@@ -5,3 +5,4 @@ bitsandbytes
 datasets
 evaluate
 scikit-learn
+numpy
