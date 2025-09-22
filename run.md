@@ -236,7 +236,7 @@ Persist `ControllerOutput.__dict__` to JSON if you want post-hoc analysis (trigg
 
 ## 8. Ablations & What-If Studies
 
-Use `scripts/ablations.py` to sweep the configurations called out in `technicals.md`:
+Use `scripts/ablations.py` to sweep configurations.
 
 ```bash
 PYTHONPATH=. python scripts/ablations.py \
