@@ -57,6 +57,7 @@ class RollbackConfig:
     rollback_depth: int = 3 # num. of tokens to erase on rollback
     cooldown: int = 5 # num. of tokens to wait after a rollback
     max_triggers: Optional[int] = 5 # max num. of rollbacks per generation
+    mode: str = "fixed" # "fixed" uses rollback_depth, "anchor" jumps to stability anchor
 
 
 @dataclass
@@ -70,9 +71,20 @@ class CoTConfig:
     length_penalty: float = 2e-3
     temperature: float = 0.7
     top_p: float = 0.95
+    stop_mode: str = "fixed" # "fixed" respects max_cot_tokens, "rauq" stops on stability, "none" disables early stop
     # Automatically set the CoT prefix based on max_cot_tokens
     def __post_init__(self):
-        self.cot_prefix = f"Wait, let's be careful and think step by step here (<{self.max_cot_tokens} tokens)."
+        self.cot_prefix = f"Wait, let's quickly think step by step about this (<{self.max_cot_tokens} tokens)."
+
+
+@dataclass
+class RerankConfig:
+    """Parameters for pause-and-rerank repair."""
+
+    candidates: int = 3
+    lookahead_horizon: int = 4
+    temperature: float = 0.7
+    top_p: float = 0.95
 
 
 @dataclass
@@ -90,8 +102,10 @@ class ControllerConfig:
     threshold_path: Optional[Path] = Path("artifacts/threshold.json")
     rollback: RollbackConfig = field(default_factory=RollbackConfig)
     cot: CoTConfig = field(default_factory=CoTConfig)
+    rerank: RerankConfig = field(default_factory=RerankConfig)
+    repair_strategy: str = "cot" # "cot" uses micro-CoT, "rerank" uses pause+rerank
     device: str = "cuda"
-    max_new_tokens: int = 512
+    max_new_tokens: int = 1024
     stop_sequences: Optional[List[str]] = None
 
 
@@ -144,6 +158,7 @@ __all__ = [
     "ThresholdTrainingConfig",
     "RollbackConfig",
     "CoTConfig",
+    "RerankConfig",
     "ControllerConfig",
     "AblationConfig",
     "FinetuneConfig",

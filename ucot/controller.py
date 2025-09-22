@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
+import math
 import torch
 
 from .config import ControllerConfig
@@ -53,6 +54,8 @@ class RAUQController:
             raise ValueError("Provide `theta` in ControllerConfig or a ThresholdResult.")
         self.rollback_cfg = config.rollback
         self.cot_cfg = config.cot
+        self.rerank_cfg = config.rerank
+        self.repair_strategy = config.repair_strategy
         self.temperature = config.temperature
         self.top_p = config.top_p
         self.max_new_tokens = config.max_new_tokens
@@ -60,8 +63,13 @@ class RAUQController:
         prefix_ids = self.tokenizer.encode(self.cot_cfg.cot_prefix, add_special_tokens=False)
         self._cot_prefix_ids = torch.tensor(prefix_ids, dtype=torch.long, device=self.device)
 
-    # ------------------------------------------------------------------ helpers
+    # helpers
 
+    # the state is a dict with keys:
+    # - tokens: (1, seq_len) tensor of token ids
+    # - attention_mask: (1, seq_len) tensor of 1s
+    # - past_key_values: model-specific past key values for kv caching
+    # - next_logits: (1, vocab_size) tensor of logits for the next token
     def _build_state_from_tokens(self, tokens: torch.Tensor) -> Dict[str, torch.Tensor]:
         attention_mask = torch.ones_like(tokens, device=self.device)
         with torch.no_grad():
@@ -82,6 +90,7 @@ class RAUQController:
         encoded = self.tokenizer(prompt, return_tensors="pt").to(self.device)
         return self._build_state_from_tokens(encoded["input_ids"])
 
+    # sample a token from logits with temperature and top-p
     def _sample(self, logits: torch.Tensor, temperature: float, top_p: float) -> torch.Tensor:
         if temperature == 0.0:
             return torch.argmax(logits, dim=-1)
@@ -99,10 +108,11 @@ class RAUQController:
         probs = torch.softmax(logits / temperature, dim=-1)
         return torch.multinomial(probs, num_samples=1).squeeze(-1)
 
+    # generate the next token, update state and scorer
     def _generate_token(
         self,
         state: Dict[str, torch.Tensor],
-        scorer: RAUQScorer,
+        scorer: TokenUncertaintyScorer,
         temperature: float,
         top_p: float,
         forced_token: Optional[int] = None,
@@ -152,35 +162,38 @@ class RAUQController:
             score = None
         return token.item(), score
 
+    # check if the token is a stopping token
     def _should_stop_token(self, token_id: int) -> bool:
         if token_id == self.tokenizer.eos_token_id:
             return True
         decoded = self.tokenizer.decode([token_id], skip_special_tokens=False)
         return any(decoded.endswith(stop) for stop in self.stop_sequences)
 
+    # compute remaining budget of new tokens
     def _remaining_budget(self, state: Dict[str, torch.Tensor], prompt_length: int) -> int:
         return self.max_new_tokens - (state["tokens"].size(1) - prompt_length)
 
-    # -------------------------------------------------------------- cot module
-
+    # cot module : run multiple cot candidates and pick the best
     def _run_cot_candidates(
         self,
         base_tokens: torch.Tensor,
-        base_scorer: RAUQScorer,
+        base_scorer: TokenUncertaintyScorer,
         prompt_length: int,
-    ) -> Tuple[Dict[str, torch.Tensor], RAUQScorer, List[float], List[RAUQScorer]]:
+    ) -> Tuple[Dict[str, torch.Tensor], TokenUncertaintyScorer, List[float], List[TokenUncertaintyScorer]]:
         best_obj = float("inf")
         best_state = None
         best_scorer = None
         best_scores: List[float] = []
-        best_snapshots: List[RAUQScorer] = []
+        best_snapshots: List[TokenUncertaintyScorer] = []
 
+        # run each candidate
         for _ in range(self.cot_cfg.candidates):
             state = self._build_state_from_tokens(base_tokens.clone())
             scorer = base_scorer.clone()
             appended_scores: List[float] = []
-            snapshots: List[RAUQScorer] = []
+            snapshots: List[TokenUncertaintyScorer] = []
 
+            # add cot prefix tokens set in config
             for prefix_id in self._cot_prefix_ids.tolist():
                 self._generate_token(
                     state,
@@ -196,9 +209,12 @@ class RAUQController:
                     break
 
             cot_lengths = 0
+            stable_streak = 0
+            # generate cot tokens
             for _ in range(self.cot_cfg.max_cot_tokens):
                 if self._remaining_budget(state, prompt_length) <= 0:
                     break
+                # generate cot token
                 token_id, score = self._generate_token(
                     state,
                     scorer,
@@ -206,14 +222,25 @@ class RAUQController:
                     top_p=self.cot_cfg.top_p,
                     update_scorer=True,
                 )
+                # record score and snapshot
                 if score is not None:
                     appended_scores.append(score)
                     snapshots.append(scorer.clone())
                     cot_lengths += 1
+                    if self.cot_cfg.stop_mode == "rauq":
+                        if score < self.theta:
+                            stable_streak += 1
+                            if stable_streak >= self.rollback_cfg.stability_window:
+                                break
+                        else:
+                            stable_streak = 0
+                # if token is eos, stop
                 if token_id == self.tokenizer.eos_token_id:
                     break
 
             lookahead_scores: List[float] = []
+            
+            # lookahead generation for uncertainty estimation of next tokens
             for _ in range(self.cot_cfg.lookahead_horizon):
                 if self._remaining_budget(state, prompt_length) <= 0:
                     break
@@ -248,9 +275,82 @@ class RAUQController:
             return self._build_state_from_tokens(base_tokens.clone()), base_scorer, [], []
         return best_state, best_scorer, best_scores, best_snapshots
 
-    # ------------------------------------------------------------------ main API
+    def _run_rerank_candidates(
+        self,
+        base_tokens: torch.Tensor,
+        base_scorer: TokenUncertaintyScorer,
+        prompt_length: int,
+    ) -> Tuple[Dict[str, torch.Tensor], TokenUncertaintyScorer, List[float], List[TokenUncertaintyScorer]]:
+        best_obj = float("inf")
+        best_state = None
+        best_scorer = None
+        best_scores: List[float] = []
+        best_snapshots: List[TokenUncertaintyScorer] = []
 
+        for _ in range(self.rerank_cfg.candidates):
+            state = self._build_state_from_tokens(base_tokens.clone())
+            scorer = base_scorer.clone()
+            evaluation_scores: List[float] = []
+            commit_scores: List[float] = []
+            commit_snapshots: List[TokenUncertaintyScorer] = []
+
+            if self._remaining_budget(state, prompt_length) <= 0:
+                continue
+
+            token_id, score = self._generate_token(
+                state,
+                scorer,
+                temperature=self.rerank_cfg.temperature,
+                top_p=self.rerank_cfg.top_p,
+                update_scorer=True,
+            )
+            tokens_after_first = state["tokens"].clone()
+            scorer_after_first = scorer.clone()
+            if score is not None:
+                evaluation_scores.append(score)
+                commit_scores.append(score)
+            else:
+                commit_scores.append(float("nan"))
+            commit_snapshots.append(scorer.clone())
+
+            lookahead_scores: List[float] = []
+            for _ in range(self.rerank_cfg.lookahead_horizon):
+                if self._remaining_budget(state, prompt_length) <= 0:
+                    break
+                token_id_la, score_la = self._generate_token(
+                    state,
+                    scorer,
+                    temperature=0.0,
+                    top_p=1.0,
+                    update_scorer=True,
+                )
+                if score_la is not None:
+                    evaluation_scores.append(score_la)
+                    lookahead_scores.append(score_la)
+                if token_id_la == self.tokenizer.eos_token_id:
+                    break
+
+            scores_for_obj = [s for s in evaluation_scores if not math.isnan(s)]
+            if scores_for_obj:
+                objective = sum(scores_for_obj) / len(scores_for_obj)
+            else:
+                objective = float("inf")
+
+            if objective < best_obj:
+                best_obj = objective
+                best_state = self._build_state_from_tokens(tokens_after_first.clone())
+                best_scorer = scorer_after_first.clone()
+                best_scores = commit_scores.copy()
+                best_snapshots = commit_snapshots.copy()
+
+        if best_state is None:
+            return self._build_state_from_tokens(base_tokens.clone()), base_scorer, [], []
+        return best_state, best_scorer, best_scores, best_snapshots
+
+    # main API
     def generate(self, prompt: str) -> ControllerOutput:
+        if hasattr(self.scorer, "reset"):
+            self.scorer.reset()
         state = self._encode_prompt(prompt)
         prompt_length = state["tokens"].size(1)
         rauq_scores: List[float] = []
@@ -260,6 +360,7 @@ class RAUQController:
         last_trigger_step = -999
         triggers = 0
 
+        # history of scores and scorers for rollback
         scorer_history: List[TokenUncertaintyScorer] = [self.scorer.clone()]
 
         while self._remaining_budget(state, prompt_length) > 0:
@@ -278,12 +379,14 @@ class RAUQController:
             if self._should_stop_token(token_id):
                 break
 
+            # stable generation, continue
             if score < self.theta:
                 stable_streak += 1
                 if stable_streak >= self.rollback_cfg.stability_window:
                     anchor = state["tokens"].size(1)
                 continue
 
+            # unstable generation, consider rollback
             stable_streak = 0
             step_index = state["tokens"].size(1) - prompt_length
             if step_index - last_trigger_step < self.rollback_cfg.cooldown:
@@ -295,7 +398,10 @@ class RAUQController:
             last_trigger_step = step_index
             trigger_events.append(TriggerEvent(position=step_index, rauq=score))
 
-            rollback_target = max(anchor, state["tokens"].size(1) - self.rollback_cfg.rollback_depth)
+            if self.rollback_cfg.mode == "anchor":
+                rollback_target = anchor
+            else:
+                rollback_target = max(anchor, state["tokens"].size(1) - self.rollback_cfg.rollback_depth)
             keep_tokens = rollback_target - prompt_length
             base_tokens = state["tokens"][:, :rollback_target]
             state = self._build_state_from_tokens(base_tokens.clone())
@@ -303,11 +409,22 @@ class RAUQController:
             rauq_scores = rauq_scores[:keep_tokens]
             scorer_history = scorer_history[: keep_tokens + 1]
 
-            state, self.scorer, appended_scores, snapshots = self._run_cot_candidates(
-                base_tokens=state["tokens"],
-                base_scorer=self.scorer,
-                prompt_length=prompt_length,
-            )
+            if self.repair_strategy == "cot":
+                state, self.scorer, appended_scores, snapshots = self._run_cot_candidates(
+                    base_tokens=state["tokens"],
+                    base_scorer=self.scorer,
+                    prompt_length=prompt_length,
+                )
+            elif self.repair_strategy == "rerank":
+                state, self.scorer, appended_scores, snapshots = self._run_rerank_candidates(
+                    base_tokens=state["tokens"],
+                    base_scorer=self.scorer,
+                    prompt_length=prompt_length,
+                )
+            else:
+                appended_scores = []
+                snapshots = []
+
             rauq_scores.extend(appended_scores)
             scorer_history.extend(snapshots)
             anchor = state["tokens"].size(1)

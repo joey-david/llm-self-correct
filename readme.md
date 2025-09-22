@@ -92,7 +92,7 @@ Two phases:
 Each ablation can be run via `ablations.py` with flags, e.g.:
 
 ```bash
-python scripts/ablations.py --trigger rauq --repair cot --rollback 3
+python scripts/ablations.py --trigger rauq --repair cot --rollback 3 --benchmark gsm8k
 ```
 
 ---

@@ -1,0 +1,18 @@
+# ignore pycache folders
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+
+# artifacts
+artifacts/
+checkpoints/
+
+# ignore conda environment files
+env/
+.venv/
+venv/
+.conda/
+.conda-env/
+
+# ignore articles and datasets
+literature/

@@ -31,7 +31,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cot-top-p", type=float, default=0.95)
     parser.add_argument("--cot-length", type=int, default=20)
     parser.add_argument("--cot-horizon", type=int, default=4)
+    parser.add_argument("--cot-candidates", type=int, default=3)
+    parser.add_argument("--cot-mode", choices=["fixed", "rauq", "none"], default="fixed")
+    parser.add_argument("--repair", choices=["cot", "rerank", "none"], default="cot")
+    parser.add_argument("--rerank-candidates", type=int, default=3)
+    parser.add_argument("--rerank-temperature", type=float, default=0.7)
+    parser.add_argument("--rerank-top-p", type=float, default=0.95)
+    parser.add_argument("--rerank-horizon", type=int, default=4)
     parser.add_argument("--rollback", type=int, default=2)
+    parser.add_argument("--rollback-mode", choices=["fixed", "anchor"], default="fixed")
     parser.add_argument("--cooldown", type=int, default=5)
     parser.add_argument("--stability-window", type=int, default=2)
     parser.add_argument("--max-triggers", type=int, default=5)
@@ -88,7 +96,18 @@ def main() -> None:
     controller_config.cot.lookahead_horizon = args.cot_horizon
     controller_config.cot.temperature = args.cot_temperature
     controller_config.cot.top_p = args.cot_top_p
+    controller_config.cot.candidates = args.cot_candidates
+    controller_config.cot.stop_mode = args.cot_mode
+    controller_config.cot.cot_prefix = (
+        f"Wait, let's quickly think step by step about this (<{controller_config.cot.max_cot_tokens} tokens)."
+    )
+    controller_config.repair_strategy = args.repair
+    controller_config.rerank.candidates = args.rerank_candidates
+    controller_config.rerank.lookahead_horizon = args.rerank_horizon
+    controller_config.rerank.temperature = args.rerank_temperature
+    controller_config.rerank.top_p = args.rerank_top_p
     controller_config.rollback.rollback_depth = args.rollback
+    controller_config.rollback.mode = args.rollback_mode
     controller_config.rollback.cooldown = args.cooldown
     controller_config.rollback.stability_window = args.stability_window
     controller_config.rollback.max_triggers = args.max_triggers
