@@ -98,6 +98,22 @@ def _apply_attn_implementation(model: PreTrainedModel, attn_implementation: str)
             setattr(generation_config, "attn_implementation", attn_implementation)
             applied = True
 
+    for module in model.modules():
+        if hasattr(module, "attn_implementation"):
+            try:
+                setattr(module, "attn_implementation", attn_implementation)
+                applied = True
+            except Exception as exc:  # pragma: no cover - depends on model internals
+                logger.debug(
+                    "Unable to set attn_implementation on %s: %s",
+                    module.__class__.__name__,
+                    exc,
+                )
+        sub_config = getattr(module, "config", None)
+        if sub_config is not None and hasattr(sub_config, "attn_implementation"):
+            setattr(sub_config, "attn_implementation", attn_implementation)
+            applied = True
+
     if not applied:
         logger.debug("Model does not expose attn_implementation hooks; proceeding with default settings")
 
