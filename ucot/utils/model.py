@@ -1,6 +1,7 @@
 """Utilities for loading Hugging Face causal language models with attention support."""
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass
 from typing import Optional
 
@@ -32,11 +33,18 @@ def load_model(
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    preferred_dtype = torch_dtype or torch.float16
+
     model_kwargs = {
         "device_map": "auto" if device == "auto" else None,
-        "torch_dtype": torch_dtype or torch.float16,
         "trust_remote_code": trust_remote_code,
     }
+
+    supports_dtype = "dtype" in inspect.signature(AutoModelForCausalLM.from_pretrained).parameters
+    if supports_dtype:
+        model_kwargs["dtype"] = preferred_dtype
+    else:
+        model_kwargs["torch_dtype"] = preferred_dtype
     if attn_implementation is not None:
         model_kwargs["attn_implementation"] = attn_implementation
 
@@ -53,6 +61,14 @@ def load_model(
                 model_name,
             )
             model_kwargs.pop("attn_implementation", None)
+            model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                **model_kwargs,
+            )
+        elif supports_dtype and "dtype" in str(error):
+            logger.warning("dtype not supported by %s; retrying with torch_dtype", model_name)
+            model_kwargs.pop("dtype", None)
+            model_kwargs["torch_dtype"] = preferred_dtype
             model = AutoModelForCausalLM.from_pretrained(
                 model_name,
                 **model_kwargs,

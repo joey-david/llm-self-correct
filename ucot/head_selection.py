@@ -48,15 +48,34 @@ def _accumulate_attention_statistics(
     samples: Iterable[Tuple[str, str]],
     device: torch.device,
     max_examples: int | None,
+    show_progress: bool,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     num_layers = model.config.num_hidden_layers
     num_heads = model.config.num_attention_heads
     attn_sum = torch.zeros(num_layers, num_heads, device=device)
     token_count = torch.zeros(num_layers, device=device)
 
+    progress_bar = None
+    if show_progress:
+        total = None
+        if hasattr(samples, "__len__"):
+            total = len(samples)
+            if max_examples is not None:
+                total = min(total, max_examples)
+        elif max_examples is not None:
+            total = max_examples
+        try:
+            from tqdm.auto import tqdm
+
+            progress_bar = tqdm(total=total, desc="Calibrating heads", unit="example")
+        except ImportError:
+            progress_bar = None
+
     for idx, (prompt, completion) in enumerate(samples):
         if max_examples is not None and idx >= max_examples:
             break
+        if progress_bar is not None:
+            progress_bar.update(1)
         encoded_prompt = tokenizer(prompt, add_special_tokens=False)
         prompt_ids = encoded_prompt["input_ids"]
         encoded_completion = tokenizer(completion or "", add_special_tokens=False)
@@ -92,6 +111,9 @@ def _accumulate_attention_statistics(
             attn_sum[layer_idx] += head_slice.sum(dim=1)
             token_count[layer_idx] += head_slice.size(1)
 
+    if progress_bar is not None:
+        progress_bar.close()
+
     return attn_sum, token_count
 
 
@@ -117,6 +139,7 @@ def select_uncertainty_heads(config: HeadSelectionConfig) -> HeadSelectionResult
         samples=samples,
         device=device,
         max_examples=config.num_examples,
+        show_progress=config.show_progress,
     )
 
     if torch.any(token_count == 0):
@@ -124,6 +147,36 @@ def select_uncertainty_heads(config: HeadSelectionConfig) -> HeadSelectionResult
         token_count = token_count.masked_fill(token_count == 0, 1.0)
 
     mean_attn = attn_sum / token_count.unsqueeze(1)
+
+    if config.log_head_stats:
+        mean_attn_cpu = mean_attn.detach().float().cpu()
+        for layer_idx in range(mean_attn_cpu.size(0)):
+            layer_scores = mean_attn_cpu[layer_idx]
+            if layer_scores.numel() == 0:
+                continue
+            sorted_scores, sorted_indices = torch.sort(layer_scores, descending=True)
+            top_score = sorted_scores[0].item()
+            top_idx = sorted_indices[0].item()
+            if sorted_scores.numel() > 1:
+                runner_score = sorted_scores[1].item()
+                runner_idx = sorted_indices[1].item()
+                margin = top_score - runner_score
+            else:
+                runner_score = float("nan")
+                runner_idx = -1
+                margin = float("nan")
+            scores_repr = ", ".join(f"{score:.6f}" for score in layer_scores.tolist())
+            logger.info(
+                "Layer %d head means: [%s] | top=%d (%.6f) runner-up=%d (%.6f) margin=%.6f",
+                layer_idx,
+                scores_repr,
+                top_idx,
+                top_score,
+                runner_idx,
+                runner_score,
+                margin,
+            )
+
     head_indices = {
         layer_idx: int(torch.argmax(mean_attn[layer_idx]).item())
         for layer_idx in range(mean_attn.size(0))

@@ -60,6 +60,7 @@ class ThresholdTrainer:
         max_new_tokens: int = 256,
         temperature: float = 0.0,
         top_p: float = 1.0,
+        show_progress: bool = True,
     ) -> None:
         self.model = loaded.model
         self.tokenizer = loaded.tokenizer
@@ -69,6 +70,7 @@ class ThresholdTrainer:
         self.top_p = top_p
         self.device = self.model.device
         self.scorer = scorer
+        self.show_progress = show_progress
 
     def _sample(self, logits: torch.Tensor) -> torch.Tensor:
         if self.temperature == 0.0:
@@ -152,12 +154,25 @@ class ThresholdTrainer:
     def collect(self, samples: Sequence[Tuple[str, str]]) -> Tuple[np.ndarray, np.ndarray]:
         token_scores: List[float] = []
         labels: List[int] = []
+        progress_bar = None
+        if self.show_progress:
+            total = len(samples)
+            try:
+                from tqdm.auto import tqdm
+
+                progress_bar = tqdm(total=total, desc="Collecting threshold data", unit="sample")
+            except ImportError:
+                progress_bar = None
         for prompt, reference in samples:
+            if progress_bar is not None:
+                progress_bar.update(1)
             prediction, scores = self._decode(prompt)
             is_correct = self.metric_fn(prompt, prediction, reference)
             failure = 0 if is_correct else 1
             token_scores.extend(scores)
             labels.extend([failure] * len(scores))
+        if progress_bar is not None:
+            progress_bar.close()
         return np.array(token_scores), np.array(labels)
 
     def fit_threshold(self, scores: np.ndarray, labels: np.ndarray, penalty: float = 1.0) -> ThresholdResult:
@@ -211,6 +226,7 @@ def train_threshold(config: ThresholdTrainingConfig, metric_fn: SequenceMetric =
         loaded=loaded,
         scorer=scorer,
         metric_fn=metric_fn,
+        show_progress=config.show_progress,
     )
 
     scores, labels = trainer.collect(samples)

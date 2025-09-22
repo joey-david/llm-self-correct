@@ -20,6 +20,8 @@ class HeadSelectionConfig:
     num_examples: Optional[int] = 256
     layers_fraction: float = 0.33
     device: str = "cuda"
+    show_progress: bool = True
+    log_head_stats: bool = True
 
 
 @dataclass
@@ -47,6 +49,7 @@ class ThresholdTrainingConfig:
     batch_size: int = 4
     device: str = "cuda"
     logistic_penalty: float = 1.0
+    show_progress: bool = True
 
 
 @dataclass

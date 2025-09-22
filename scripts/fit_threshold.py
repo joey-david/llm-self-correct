@@ -21,6 +21,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-samples", type=int, default=2048)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--penalty", type=float, default=1.0, help="Inverse regularisation strength (C)")
+    parser.add_argument("--no-progress", action="store_true", help="Disable tqdm progress reporting")
     return parser
 
 
@@ -39,6 +40,7 @@ def main() -> None:
         max_samples=args.max_samples,
         device=args.device,
         logistic_penalty=args.penalty,
+        show_progress=not args.no_progress,
     )
     train_threshold(config, metric_fn=exact_match_metric)
 
