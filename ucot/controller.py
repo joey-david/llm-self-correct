@@ -44,6 +44,7 @@ class RAUQController:
         scorer: TokenUncertaintyScorer,
         threshold: Optional[ThresholdResult] = None,
     ) -> None:
+        """Prepare the controller with decoding settings, scorer, and optional threshold."""
         self.model = loaded.model
         self.tokenizer = loaded.tokenizer
         self.config = config
@@ -63,14 +64,8 @@ class RAUQController:
         prefix_ids = self.tokenizer.encode(self.cot_cfg.cot_prefix, add_special_tokens=False)
         self._cot_prefix_ids = torch.tensor(prefix_ids, dtype=torch.long, device=self.device)
 
-    # helpers
-
-    # the state is a dict with keys:
-    # - tokens: (1, seq_len) tensor of token ids
-    # - attention_mask: (1, seq_len) tensor of 1s
-    # - past_key_values: model-specific past key values for kv caching
-    # - next_logits: (1, vocab_size) tensor of logits for the next token
     def _build_state_from_tokens(self, tokens: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """Construct a decoding state dict (tokens, mask, cache, logits) for `tokens`."""
         attention_mask = torch.ones_like(tokens, device=self.device)
         with torch.no_grad():
             outputs = self.model(
@@ -87,11 +82,12 @@ class RAUQController:
         }
 
     def _encode_prompt(self, prompt: str) -> Dict[str, torch.Tensor]:
+        """Tokenise `prompt` and return an initial decoding state."""
         encoded = self.tokenizer(prompt, return_tensors="pt").to(self.device)
         return self._build_state_from_tokens(encoded["input_ids"])
 
-    # sample a token from logits with temperature and top-p
     def _sample(self, logits: torch.Tensor, temperature: float, top_p: float) -> torch.Tensor:
+        """Sample a token id according to temperature and nucleus parameters."""
         if temperature == 0.0:
             return torch.argmax(logits, dim=-1)
         if top_p < 1.0:
@@ -108,7 +104,6 @@ class RAUQController:
         probs = torch.softmax(logits / temperature, dim=-1)
         return torch.multinomial(probs, num_samples=1).squeeze(-1)
 
-    # generate the next token, update state and scorer
     def _generate_token(
         self,
         state: Dict[str, torch.Tensor],
@@ -118,6 +113,7 @@ class RAUQController:
         forced_token: Optional[int] = None,
         update_scorer: bool = True,
     ) -> Tuple[int, Optional[float]]:
+        """Advance decoding by one token and optionally update the uncertainty scorer."""
         logits = state.pop("next_logits", None)
         current_past = state["past_key_values"]
         if logits is None:
@@ -162,38 +158,36 @@ class RAUQController:
             score = None
         return token.item(), score
 
-    # check if the token is a stopping token
     def _should_stop_token(self, token_id: int) -> bool:
+        """Return True when `token_id` should terminate generation under current settings."""
         if token_id == self.tokenizer.eos_token_id:
             return True
         decoded = self.tokenizer.decode([token_id], skip_special_tokens=False)
         return any(decoded.endswith(stop) for stop in self.stop_sequences)
 
-    # compute remaining budget of new tokens
     def _remaining_budget(self, state: Dict[str, torch.Tensor], prompt_length: int) -> int:
+        """Compute how many additional tokens may be generated before hitting the budget."""
         return self.max_new_tokens - (state["tokens"].size(1) - prompt_length)
 
-    # cot module : run multiple cot candidates and pick the best
     def _run_cot_candidates(
         self,
         base_tokens: torch.Tensor,
         base_scorer: TokenUncertaintyScorer,
         prompt_length: int,
     ) -> Tuple[Dict[str, torch.Tensor], TokenUncertaintyScorer, List[float], List[TokenUncertaintyScorer]]:
+        """Evaluate micro-CoT repair candidates and return the best resulting state."""
         best_obj = float("inf")
         best_state = None
         best_scorer = None
         best_scores: List[float] = []
         best_snapshots: List[TokenUncertaintyScorer] = []
 
-        # run each candidate
         for _ in range(self.cot_cfg.candidates):
             state = self._build_state_from_tokens(base_tokens.clone())
             scorer = base_scorer.clone()
             appended_scores: List[float] = []
             snapshots: List[TokenUncertaintyScorer] = []
 
-            # add cot prefix tokens set in config
             for prefix_id in self._cot_prefix_ids.tolist():
                 self._generate_token(
                     state,
@@ -210,7 +204,6 @@ class RAUQController:
 
             cot_lengths = 0
             stable_streak = 0
-            # generate cot tokens
             for _ in range(self.cot_cfg.max_cot_tokens):
                 if self._remaining_budget(state, prompt_length) <= 0:
                     break
@@ -240,7 +233,6 @@ class RAUQController:
 
             lookahead_scores: List[float] = []
             
-            # lookahead generation for uncertainty estimation of next tokens
             for _ in range(self.cot_cfg.lookahead_horizon):
                 if self._remaining_budget(state, prompt_length) <= 0:
                     break
@@ -281,6 +273,7 @@ class RAUQController:
         base_scorer: TokenUncertaintyScorer,
         prompt_length: int,
     ) -> Tuple[Dict[str, torch.Tensor], TokenUncertaintyScorer, List[float], List[TokenUncertaintyScorer]]:
+        """Try rerank repair candidates and keep the state with minimal uncertainty."""
         best_obj = float("inf")
         best_state = None
         best_scorer = None
@@ -347,8 +340,8 @@ class RAUQController:
             return self._build_state_from_tokens(base_tokens.clone()), base_scorer, [], []
         return best_state, best_scorer, best_scores, best_snapshots
 
-    # main API
     def generate(self, prompt: str) -> ControllerOutput:
+        """Run RAUQ-triggered decoding with rollback and optional repair strategies."""
         if hasattr(self.scorer, "reset"):
             self.scorer.reset()
         state = self._encode_prompt(prompt)

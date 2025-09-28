@@ -21,6 +21,7 @@ class HeadIndices:
 
     @classmethod
     def load(cls, path: Path) -> "HeadIndices":
+        """Load stored head indices and layer metadata from `path`."""
         payload = json.loads(path.read_text())
         mapping = {int(k): int(v) for k, v in payload["head_indices"].items()}
         layers_used = payload.get("layers_used")
@@ -28,6 +29,7 @@ class HeadIndices:
 
 
 def select_informative_layers(total_layers: int, fraction: float = 0.33) -> List[int]:
+    """Pick a centered span of layers covering the requested fraction of the stack."""
     span = max(1, int(round(total_layers * fraction)))
     start = max(0, (total_layers - span) // 2)
     layers = list(range(start, min(total_layers, start + span)))
@@ -45,6 +47,7 @@ class RAUQScorer:
         eps: float = 1e-12,
         device: Optional[torch.device] = None,
     ) -> None:
+        """Initialise running RAUQ statistics for the provided layers and heads."""
         self.alpha = alpha
         self.head_indices = head_indices
         self.layers = list(layers)
@@ -55,6 +58,7 @@ class RAUQScorer:
 
     @classmethod
     def from_config(cls, config: RAUQConfig, num_layers: int) -> "RAUQScorer":
+        """Build a scorer from configuration defaults and the model's layer count."""
         head_indices = HeadIndices.load(config.head_indices_path)
         layers = head_indices.layers_used or select_informative_layers(num_layers, config.layers_fraction)
         return cls(
@@ -66,6 +70,7 @@ class RAUQScorer:
         )
 
     def clone(self) -> "RAUQScorer":
+        """Return a detached copy of the scorer including accumulated statistics."""
         scorer = RAUQScorer(
             alpha=self.alpha,
             head_indices=self.head_indices,
@@ -78,10 +83,12 @@ class RAUQScorer:
         return scorer
 
     def reset(self) -> None:
+        """Zero-out the running layer statistics so fresh decoding can begin."""
         self.layer_sums.zero_()
         self.token_counts.zero_()
 
     def _get_attention_prev_token(self, layer_attn: torch.Tensor, head_idx: int) -> torch.Tensor:
+        """Extract the attention weight on the previous token for the selected head."""
         query_len = layer_attn.size(-2)
         key_len = layer_attn.size(-1)
         if key_len < 2:
@@ -92,6 +99,7 @@ class RAUQScorer:
         return values.clamp_min(self.eps)
 
     def _log_prob(self, logits: torch.Tensor, token_id: int | torch.Tensor) -> torch.Tensor:
+        """Compute log-probability values for `token_id` from raw logits."""
         log_probs = torch.log_softmax(logits, dim=-1)
         if isinstance(token_id, torch.Tensor):
             index = token_id
@@ -113,6 +121,7 @@ class RAUQScorer:
         attentions: Sequence[torch.Tensor],
         update_state: bool = True,
     ) -> float:
+        """Score a single token and optionally fold it into the running statistics."""
         logp = self._log_prob(logits, token_id).mean()
 
         layer_uncertainties = []
@@ -131,6 +140,7 @@ class RAUQScorer:
         return token_score
 
     def running_rauq(self) -> float:
+        """Return the current RAUQ aggregate across layers, or NaN if incomplete."""
         if torch.any(self.token_counts == 0):
             return float("nan")
         means = self.layer_sums / self.token_counts

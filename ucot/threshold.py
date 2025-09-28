@@ -26,6 +26,7 @@ SequenceMetric = Callable[[str, str, str], bool]
 
 
 def exact_match_metric(prompt: str, prediction: str, reference: str) -> bool:
+    """Return True when the stripped prediction exactly matches the reference."""
     return prediction.strip() == reference.strip()
 
 
@@ -36,6 +37,7 @@ class ThresholdResult:
     logistic_intercept: float
 
     def save(self, path: Path) -> None:
+        """Persist the learned threshold parameters to `path` as JSON."""
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "theta": self.theta,
@@ -47,6 +49,7 @@ class ThresholdResult:
 
     @classmethod
     def load(cls, path: Path) -> "ThresholdResult":
+        """Instantiate a result by reading previously saved parameters from `path`."""
         payload = json.loads(path.read_text())
         return cls(theta=payload["theta"], logistic_coef=payload["logistic_coef"], logistic_intercept=payload["logistic_intercept"])
 
@@ -62,6 +65,7 @@ class ThresholdTrainer:
         top_p: float = 1.0,
         show_progress: bool = True,
     ) -> None:
+        """Configure the trainer with a model, scorer, metric, and decoding parameters."""
         self.model = loaded.model
         self.tokenizer = loaded.tokenizer
         self.metric_fn = metric_fn
@@ -73,6 +77,7 @@ class ThresholdTrainer:
         self.show_progress = show_progress
 
     def _sample(self, logits: torch.Tensor) -> torch.Tensor:
+        """Select the next token id according to the configured sampling strategy."""
         if self.temperature == 0.0:
             return torch.argmax(logits, dim=-1)
         if self.top_p < 1.0:
@@ -90,6 +95,7 @@ class ThresholdTrainer:
         return torch.multinomial(probs, num_samples=1).squeeze(-1)
 
     def _decode(self, prompt: str) -> Tuple[str, List[float]]:
+        """Generate a completion for `prompt` while recording per-token RAUQ scores."""
         tokenizer = self.tokenizer
         model = self.model
         scorer = self.scorer
@@ -152,6 +158,7 @@ class ThresholdTrainer:
         return completion_text, scores
 
     def collect(self, samples: Sequence[Tuple[str, str]]) -> Tuple[np.ndarray, np.ndarray]:
+        """Run decoding on calibration samples to gather token scores and failure labels."""
         token_scores: List[float] = []
         labels: List[int] = []
         progress_bar = None
@@ -176,6 +183,7 @@ class ThresholdTrainer:
         return np.array(token_scores), np.array(labels)
 
     def fit_threshold(self, scores: np.ndarray, labels: np.ndarray, penalty: float = 1.0) -> ThresholdResult:
+        """Calibrate a logistic model on token scores and derive an optimal threshold."""
         if LogisticRegression is None:
             raise RuntimeError("scikit-learn is required for threshold calibration")
         clf = LogisticRegression(C=penalty, max_iter=1000)
@@ -202,6 +210,7 @@ class ThresholdTrainer:
 
 
 def train_threshold(config: ThresholdTrainingConfig, metric_fn: SequenceMetric = exact_match_metric) -> ThresholdResult:
+    """Train and persist a RAUQ trigger threshold as specified by `config`."""
     samples = load_prompt_completion_pairs(config.calibration_paths)
     if config.max_samples is not None:
         samples = samples[: config.max_samples]

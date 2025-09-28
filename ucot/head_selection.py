@@ -24,6 +24,7 @@ class HeadSelectionResult:
     layers_used: List[int]
 
     def save(self, path: Path) -> None:
+        """Write the head selection result to `path` as a JSON payload."""
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {"head_indices": self.head_indices, "layers_used": self.layers_used}
         path.write_text(json.dumps(payload, indent=2))
@@ -31,11 +32,13 @@ class HeadSelectionResult:
 
     @classmethod
     def load(cls, path: Path) -> "HeadSelectionResult":
+        """Restore a head selection result from a JSON file at `path`."""
         payload = json.loads(path.read_text())
         return cls(head_indices={int(k): int(v) for k, v in payload["head_indices"].items()}, layers_used=payload["layers_used"])
 
 
 def _select_informative_layers(num_layers: int, fraction: float = 0.33) -> List[int]:
+    """Choose a contiguous span of layers centred in the stack for calibration."""
     span = max(1, int(round(num_layers * fraction)))
     start = (num_layers - span) // 2
     layers = list(range(start, start + span))
@@ -50,6 +53,7 @@ def _accumulate_attention_statistics(
     max_examples: int | None,
     show_progress: bool,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Aggregate per-head attention statistics over the provided prompt/completion pairs."""
     num_layers = model.config.num_hidden_layers
     num_heads = model.config.num_attention_heads
     attn_sum = torch.zeros(num_layers, num_heads, device=device)
@@ -118,6 +122,7 @@ def _accumulate_attention_statistics(
 
 
 def select_uncertainty_heads(config: HeadSelectionConfig) -> HeadSelectionResult:
+    """Calibrate attention heads offline and persist the most informative choices."""
     logger.info("Selecting RAUQ heads for model %s", config.model_name)
     loaded = load_model(
         model_name=config.model_name,

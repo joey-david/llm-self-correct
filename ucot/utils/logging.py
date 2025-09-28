@@ -8,8 +8,7 @@ from typing import Optional
 def setup_logging(level: int = logging.INFO, name: Optional[str] = None) -> logging.Logger:
     """Return a configured logger.
 
-    The harness uses a simple stream handler to avoid noisy duplicate handlers
-    when scripts are imported vs executed directly.
+    The harness uses a simple stream handler to avoid noisy duplicate handlers when scripts are imported vs executed directly.
     """
 
     logger = logging.getLogger(name or "ucot")

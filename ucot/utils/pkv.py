@@ -11,8 +11,7 @@ PastKeyValues = Tuple[Tuple[torch.Tensor, torch.Tensor], ...]
 def slice_past_key_values(past: PastKeyValues, length: int) -> PastKeyValues:
     """Slice cached key/values to a specific sequence length.
 
-    Hugging Face caches use shape (batch, heads, seq, head_dim). We truncate the
-    sequence dimension to `length` across all layers.
+    Hugging Face caches use shape (batch, heads, seq, head_dim). We truncate the sequence dimension to `length` across all layers.
     """
 
     if past is None:
