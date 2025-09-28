@@ -1,7 +1,9 @@
 torch
 transformers
-accelerate
 datasets
-evaluate
 scikit-learn
 numpy
+ipykernel
+huggingface_hub
+datasets
+hf_transfer

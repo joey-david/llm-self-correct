@@ -3,7 +3,7 @@
 ## Finding hallucination threshold
 
 ### Record token RAUQs on calibration dataset
-- Build calibration dataset as combination of datasets with known hallucinations (e.g. FEVER, SummEval, etc.), target 5k - 10k examples.
+- Build calibration dataset as combination of QA, reasoning, etc, datasets ,some with known hallucinations, target 5k - 10k examples.
 - For each example, run greedy decoding once with no CoT, and record token RAUQs, assign final label based on example ground truth (possibly using AlignScore).
 - For wrong answers, find the token with lowest RAUQ, and label that token as a hallucination trigger.
 
