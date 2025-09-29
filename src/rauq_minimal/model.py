@@ -54,14 +54,16 @@ class ModelAdapter:
         else:
             self.use_chat_template = bool(use_chat_template)
 
-        self._chat_template_supports_enable_thinking = False
+        self._chat_template_supports_enable_thinking: Optional[bool] = None
         self._last_enable_thinking: Optional[bool] = None
+        self._warned_enable_thinking_missing = False
         if self._chat_template is not None:
             try:
                 signature = inspect.signature(self._chat_template)
-                self._chat_template_supports_enable_thinking = "enable_thinking" in signature.parameters
+                if "enable_thinking" in signature.parameters:
+                    self._chat_template_supports_enable_thinking = True
             except (TypeError, ValueError):
-                self._chat_template_supports_enable_thinking = False
+                pass
 
         config: Optional[AutoConfig] = None
         config_kwargs: dict[str, Any] = {}
@@ -141,21 +143,43 @@ class ModelAdapter:
     def encode(self, prompt: str) -> torch.LongTensor:
         self._last_enable_thinking = None
         if self.use_chat_template and self._chat_template is not None:
+            messages = [{"role": "user", "content": prompt}]
             chat_kwargs: dict[str, Any] = {
                 "add_generation_prompt": True,
                 "tokenize": True,
                 "return_tensors": "pt",
             }
-            if self._chat_template_supports_enable_thinking:
+            attempted_enable = False
+            if self._chat_template_supports_enable_thinking is not False:
                 chat_kwargs["enable_thinking"] = False
-            self._last_enable_thinking = chat_kwargs.get("enable_thinking")
+                attempted_enable = True
+
+            try:
+                encoded = self._chat_template(messages, **chat_kwargs)
+            except TypeError as exc:
+                if attempted_enable and "enable_thinking" in str(exc):
+                    self._chat_template_supports_enable_thinking = False
+                    if not self._warned_enable_thinking_missing:
+                        print(
+                            "[ModelAdapter] apply_chat_template does not accept enable_thinking; "
+                            "continuing without it."
+                        )
+                        self._warned_enable_thinking_missing = True
+                    chat_kwargs.pop("enable_thinking", None)
+                    encoded = self._chat_template(messages, **chat_kwargs)
+                    self._last_enable_thinking = None
+                else:
+                    raise
+            else:
+                if attempted_enable:
+                    self._chat_template_supports_enable_thinking = True
+                    self._last_enable_thinking = False
+                else:
+                    self._last_enable_thinking = None
+
             print(
                 f"[ModelAdapter] enable_thinking={self._last_enable_thinking} "
                 f"(supports={self._chat_template_supports_enable_thinking})"
-            )
-            encoded = self._chat_template(
-                [{"role": "user", "content": prompt}],
-                **chat_kwargs,
             )
         else:
             encoded = self.tokenizer(prompt, return_tensors="pt", add_special_tokens=False)
@@ -170,7 +194,7 @@ class ModelAdapter:
         return self._last_enable_thinking
 
     @property
-    def chat_template_supports_enable_thinking(self) -> bool:
+    def chat_template_supports_enable_thinking(self) -> Optional[bool]:
         return self._chat_template_supports_enable_thinking
 
     def _extract_input_ids(self, encoded: Any) -> torch.LongTensor:
