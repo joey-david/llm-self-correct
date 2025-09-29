@@ -33,7 +33,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "dtype": "auto",
     "store_all_heads": False,
     "seed": 42, # the normie seed
-    "dataset_fraction": 0.1,
+    "dataset_fraction": 0.2, # start with 2000 samples for speed
 }
 REQUIRED_KEYS = ("in", "out")
 
@@ -64,8 +64,8 @@ def load_config(config_path: Path) -> Dict[str, Any]:
         fraction_val = float(fraction)
     except (TypeError, ValueError) as exc:
         raise ValueError("dataset_fraction must be a float between 0 and 1") from exc
-    if fraction_val < 0.0 or fraction_val > 1.0:
-        raise ValueError("dataset_fraction must be between 0 and 1")
+    # clamp
+    fraction_val = max(0.0, min(1.0, fraction_val))
     config["dataset_fraction"] = fraction_val
 
     missing = [key for key in REQUIRED_KEYS if not config.get(key)]

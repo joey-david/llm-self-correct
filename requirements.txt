@@ -8,3 +8,5 @@ huggingface_hub
 datasets
 hf_transfer
 pyyaml
+alignscore-SpeedOfMagic
+python-dotenv

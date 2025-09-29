@@ -15,5 +15,8 @@ venv/
 .conda/
 .conda-env/
 
+# local secrets
+.env
+
 # all pdfs under lit/
 lit/**/*.pdf

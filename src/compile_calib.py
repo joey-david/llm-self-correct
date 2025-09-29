@@ -8,12 +8,18 @@ import random
 from collections import defaultdict
 
 from datasets import load_dataset, concatenate_datasets
+from datasets.features import Sequence
+from datasets.features import features as datasets_features
+
+# Older cached dataset metadata still records list features using the legacy
+# "List" type, which newer `datasets` releases dropped. Register a fallback so
+# we can deserialize those caches without upgrading the global installation.
+datasets_features._FEATURE_TYPES.setdefault("List", Sequence)
 
 SEED = 42
 random.seed(SEED)
 
 OUT_JSONL = "data/calibration/calibration_10k.jsonl"
-OUT_JSON  = "data/calibration/calibration_10k.json"
 
 # ---------- Normalization / helpers ----------
 
@@ -361,15 +367,12 @@ def main():
     # Shuffle final set for balance
     random.Random(SEED).shuffle(sampled)
 
-    # Save JSONL + JSON
+    # Save JSONL
     with open(OUT_JSONL, "w", encoding="utf-8") as f:
         for rec in sampled:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
-    with open(OUT_JSON, "w", encoding="utf-8") as f:
-        json.dump(sampled, f, ensure_ascii=False)
-
-    print(f"Wrote {len(sampled)} examples to {OUT_JSONL} and {OUT_JSON}")
+    print(f"Wrote {len(sampled)} examples to {OUT_JSONL}")
 
 if __name__ == "__main__":
     main()

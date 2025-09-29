@@ -75,7 +75,7 @@ class Runner:
                 "prompt": prompt,
                 "pred_text": pred_text,
                 "pred_eval": pred_eval,
-                "correct": self.scorer.score(record, pred_eval),
+                "correct": self.scorer.score(record, pred_eval, raw_pred=pred_text),
                 "alpha": self.rauq.alpha,
                 "selected_heads": {},
                 "layers": [],
@@ -134,7 +134,7 @@ class Runner:
 
         pred_text = self.model_adapter.tokenizer.decode(gen_token_ids, skip_special_tokens=True)
         pred_eval = self._make_pred_eval(record, pred_text)
-        correct = self.scorer.score(record, pred_eval)
+        correct = self.scorer.score(record, pred_eval, raw_pred=pred_text)
 
         selected_heads = self.head_selector.select_for_sequence(a_prev_all_heads)
         layers = sorted(int(layer[1:]) for layer in selected_heads.keys()) if selected_heads else []

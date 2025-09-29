@@ -16,3 +16,5 @@ dataset_fraction: 0.5
 ```
 
 Run with `python src/rauq_minimal.py --config path/to/config.yaml`. Omitting `--config` falls back to the defaults baked into the script. The runner streams one JSONL line per selected record (respecting `dataset_fraction`) with the decoded text, RAUQ summaries, and optionally all per-head attentions.
+
+
