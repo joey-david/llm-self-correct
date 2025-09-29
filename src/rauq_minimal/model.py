@@ -177,10 +177,10 @@ class ModelAdapter:
                 else:
                     self._last_enable_thinking = None
 
-            print(
-                f"[ModelAdapter] enable_thinking={self._last_enable_thinking} "
-                f"(supports={self._chat_template_supports_enable_thinking})"
-            )
+            # print(
+            #     f"[ModelAdapter] enable_thinking={self._last_enable_thinking} "
+            #     f"(supports={self._chat_template_supports_enable_thinking})"
+            # )
         else:
             encoded = self.tokenizer(prompt, return_tensors="pt", add_special_tokens=False)
 
