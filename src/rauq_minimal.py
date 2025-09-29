@@ -38,7 +38,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "store_all_heads": False,
     "seed": 42,  # the normie seed
     "dataset_fraction": 0.2,  # start with 2000 samples for speed
-    "debug_decode": True,
+    "debug_decode": False,
 }
 REQUIRED_KEYS = ("in", "out")
 

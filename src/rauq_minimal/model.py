@@ -62,18 +62,25 @@ class ModelAdapter:
             except (TypeError, ValueError):
                 self._chat_template_supports_enable_thinking = False
 
+        config: Optional[AutoConfig] = None
         config_kwargs: dict[str, Any] = {}
         if self.trust_remote_code:
             config_kwargs["trust_remote_code"] = True
-        config = AutoConfig.from_pretrained(model_name, **config_kwargs)
-        if self.attn_implementation:
-            setattr(config, "attn_implementation", self.attn_implementation)
-            setattr(config, "_attn_implementation", self.attn_implementation)
-        config.output_attentions = self.output_attentions
-        config.use_cache = True
-        config.return_dict = True
+        try:
+            config = AutoConfig.from_pretrained(model_name, **config_kwargs)
+        except (ValueError, KeyError, OSError):
+            config = None
+        if config is not None:
+            if self.attn_implementation:
+                setattr(config, "attn_implementation", self.attn_implementation)
+                setattr(config, "_attn_implementation", self.attn_implementation)
+            config.output_attentions = self.output_attentions
+            config.use_cache = True
+            config.return_dict = True
 
-        model_kwargs: dict[str, Any] = {"device_map": None, "config": config}
+        model_kwargs: dict[str, Any] = {"device_map": None}
+        if config is not None:
+            model_kwargs["config"] = config
         if self.trust_remote_code:
             model_kwargs["trust_remote_code"] = True
         if isinstance(self.dtype, torch.dtype):
@@ -110,14 +117,15 @@ class ModelAdapter:
         self.model.config.return_dict = True
 
         if hasattr(self.model, "generation_config") and self.model.generation_config is not None:
+            gen_config = self.model.generation_config
             if self.attn_implementation:
-                setattr(self.model.generation_config, "attn_implementation", self.attn_implementation)
-                if hasattr(self.model.generation_config, "_attn_implementation"):
-                    setattr(self.model.generation_config, "_attn_implementation", self.attn_implementation)
-            self.model.generation_config.output_attentions = self.output_attentions
-            self.model.generation_config.use_cache = True
-            if hasattr(self.model.generation_config, "return_dict_in_generate"):
-                self.model.generation_config.return_dict_in_generate = True
+                setattr(gen_config, "attn_implementation", self.attn_implementation)
+                if hasattr(gen_config, "_attn_implementation"):
+                    setattr(gen_config, "_attn_implementation", self.attn_implementation)
+            if hasattr(gen_config, "use_cache"):
+                gen_config.use_cache = True
+            if hasattr(gen_config, "return_dict_in_generate"):
+                gen_config.return_dict_in_generate = True
 
     @property
     def eos_token_ids(self) -> Tuple[int, ...]:
@@ -141,11 +149,24 @@ class ModelAdapter:
                 [{"role": "user", "content": prompt}],
                 **chat_kwargs,
             )
-            input_ids = encoded["input_ids"]
         else:
             encoded = self.tokenizer(prompt, return_tensors="pt", add_special_tokens=False)
-            input_ids = encoded["input_ids"]
+
+        input_ids = self._extract_input_ids(encoded)
+        if input_ids.dim() == 1:
+            input_ids = input_ids.unsqueeze(0)
         return input_ids.to(self.device)
+
+    def _extract_input_ids(self, encoded: Any) -> torch.LongTensor:
+        if isinstance(encoded, dict):
+            if "input_ids" in encoded:
+                return encoded["input_ids"]
+            raise KeyError("Encoded output missing 'input_ids'")
+        if hasattr(encoded, "input_ids"):
+            return getattr(encoded, "input_ids")
+        if torch.is_tensor(encoded):
+            return encoded
+        raise TypeError(f"Unsupported encoded type: {type(encoded)!r}")
 
     def step(
         self,
