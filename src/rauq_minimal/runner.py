@@ -29,6 +29,7 @@ class Runner:
         max_new_tokens: int,
         store_all_heads: bool = False,
         dataset_fraction: float = 1.0,
+        debug_decode: bool = False,
     ) -> None:
         self.model_adapter = model_adapter
         self.prompt_builder = prompt_builder
@@ -40,6 +41,7 @@ class Runner:
         if dataset_fraction < 0.0 or dataset_fraction > 1.0:
             raise ValueError("dataset_fraction must be between 0 and 1")
         self.dataset_fraction = dataset_fraction
+        self.debug_decode = debug_decode
 
     def run(self, input_path: str, output_path: str) -> None:
         selected_indices: Optional[Set[int]] = None
@@ -104,6 +106,8 @@ class Runner:
         gen_token_ids.append(next_token_id)
         logp_token.append(logp)
         a_prev_all_heads.append({})  # placeholder for token-level attentions
+        if self.debug_decode:
+            self._debug_log_token(len(gen_token_ids), next_token_id, logp)
 
         current_input_ids = torch.tensor([[next_token_id]], dtype=torch.long, device=self.model_adapter.device)
         token_mask = torch.ones_like(current_input_ids, dtype=torch.long, device=self.model_adapter.device)
@@ -120,16 +124,25 @@ class Runner:
             gen_token_ids.append(next_token_id)
             logp_token.append(logp)
             a_prev_all_heads.append({})
+            if self.debug_decode:
+                self._debug_log_token(len(gen_token_ids), next_token_id, logp)
 
             current_input_ids = torch.tensor([[next_token_id]], dtype=torch.long, device=self.model_adapter.device)
             stop = self._should_stop(next_token_id)
 
         if gen_token_ids and a_prev_all_heads[-1] == {}:
-            _, _, attns, _ = self.model_adapter.step(
-                current_input_ids,
-                past_key_values=past,
-                attention_mask=token_mask,
-            )
+            prev_debug_state = getattr(self.model_adapter, "debug_decode", False)
+            if prev_debug_state:
+                self.model_adapter.debug_decode = False
+            try:
+                _, _, attns, _ = self.model_adapter.step(
+                    current_input_ids,
+                    past_key_values=past,
+                    attention_mask=token_mask,
+                )
+            finally:
+                if prev_debug_state:
+                    self.model_adapter.debug_decode = prev_debug_state
             a_prev_all_heads[-1] = self._extract_prev_attention(attns)
 
         if gen_token_ids:
@@ -174,6 +187,14 @@ class Runner:
     def _should_stop(self, token_id: int) -> bool:
         eos_ids = self.model_adapter.eos_token_ids
         return bool(eos_ids) and token_id in eos_ids
+
+    def _debug_log_token(self, step_idx: int, token_id: int, logp: float) -> None:
+        token_text = self.model_adapter.tokenizer.decode([token_id], skip_special_tokens=False)
+        if not token_text:
+            pieces = self.model_adapter.tokenizer.convert_ids_to_tokens([token_id])
+            token_text = pieces[0] if pieces else str(token_id)
+        display = token_text.replace("\n", "\\n")
+        print(f"[Runner] step={step_idx} token={display!r} (id={token_id}) logp={logp:.3f}")
 
     def _extract_prev_attention(self, attentions: tuple) -> Dict[str, List[float]]:
         if attentions is None:
