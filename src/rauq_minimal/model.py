@@ -26,17 +26,27 @@ class ModelAdapter:
             else:
                 self.tokenizer.add_special_tokens({"pad_token": "<|pad|>"})
 
-        model_kwargs = {"device_map": None}
+        model_kwargs = {"device_map": None, "attn_implementation": "eager"}
         if isinstance(self.dtype, torch.dtype):
             model_kwargs["torch_dtype"] = self.dtype
 
-        self.model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
+        try:
+            self.model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
+        except TypeError:
+            # Older transformer builds might not accept attn_implementation.
+            model_kwargs.pop("attn_implementation", None)
+            self.model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
         if hasattr(self.model, "resize_token_embeddings"):
             self.model.resize_token_embeddings(len(self.tokenizer))
 
         self.model.to(self.device)
         self.model.eval()
         self.config = self.model.config
+
+        if hasattr(self.model.config, "attn_implementation"):
+            self.model.config.attn_implementation = "eager"
+        if hasattr(self.model.config, "_attn_implementation"):
+            self.model.config._attn_implementation = "eager"
 
     @property
     def eos_token_ids(self) -> Tuple[int, ...]:

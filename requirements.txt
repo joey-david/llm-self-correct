@@ -10,3 +10,4 @@ hf_transfer
 pyyaml
 alignscore-SpeedOfMagic
 python-dotenv
+tqdm

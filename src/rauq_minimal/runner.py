@@ -7,6 +7,7 @@ from typing import Dict, List, Optional, Set
 
 import numpy as np
 import torch
+from tqdm.auto import tqdm
 
 from .heads import HeadSelector
 from .model import ModelAdapter
@@ -47,9 +48,14 @@ class Runner:
         elif self.dataset_fraction == 0.0:
             selected_indices = set()
 
+        if selected_indices is None:
+            total_records = self._count_records(input_path)
+        else:
+            total_records = len(selected_indices)
+
         with open(input_path, "r", encoding="utf-8") as fin, open(
             output_path, "w", encoding="utf-8"
-        ) as fout:
+        ) as fout, tqdm(total=total_records, desc="Labeling RAUQ", unit="record") as progress:
             for idx, line in enumerate(fin):
                 if selected_indices is not None and idx not in selected_indices:
                     continue
@@ -60,6 +66,7 @@ class Runner:
                 result = self.process_record(record)
                 fout.write(json.dumps(result) + "\n")
                 fout.flush()
+                progress.update(1)
 
     def process_record(self, record: Dict) -> Dict:
         prompt = self.prompt_builder.build(record)
@@ -259,6 +266,14 @@ class Runner:
 
         chosen = set(random.sample(indices, target_count))
         return chosen
+
+    def _count_records(self, input_path: str) -> int:
+        count = 0
+        with open(input_path, "r", encoding="utf-8") as fin:
+            for line in fin:
+                if line.strip():
+                    count += 1
+        return count
 
 
 def set_seed(seed: int) -> None:
