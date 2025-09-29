@@ -74,6 +74,10 @@ class Runner:
         prompt = self.prompt_builder.build(record)
         prompt_ids = self.model_adapter.encode(prompt)
         prompt_mask = torch.ones_like(prompt_ids, dtype=torch.long, device=self.model_adapter.device)
+        print(
+            f"[Runner] enable_thinking status: {self.model_adapter.enable_thinking_status} "
+            f"(supports={self.model_adapter.chat_template_supports_enable_thinking})"
+        )
 
         if self.max_new_tokens <= 0:
             pred_text = ""
@@ -154,6 +158,7 @@ class Runner:
             a_prev_all_heads[0] = zero_dict
 
         pred_text = self.model_adapter.tokenizer.decode(gen_token_ids, skip_special_tokens=True)
+        assert "<think>" not in pred_text, "Model emitted hidden thinking tokens despite disable."
         pred_eval = self._make_pred_eval(record, pred_text)
         correct = self.scorer.score(record, pred_eval, raw_pred=pred_text)
 

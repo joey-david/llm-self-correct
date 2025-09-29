@@ -55,6 +55,7 @@ class ModelAdapter:
             self.use_chat_template = bool(use_chat_template)
 
         self._chat_template_supports_enable_thinking = False
+        self._last_enable_thinking: Optional[bool] = None
         if self._chat_template is not None:
             try:
                 signature = inspect.signature(self._chat_template)
@@ -87,9 +88,6 @@ class ModelAdapter:
             model_kwargs["torch_dtype"] = self.dtype
         if self.attn_implementation:
             model_kwargs["attn_implementation"] = self.attn_implementation
-        if self.output_attentions is not None:
-            model_kwargs["output_attentions"] = self.output_attentions
-
         try:
             self.model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
         except TypeError:
@@ -97,7 +95,6 @@ class ModelAdapter:
             try:
                 self.model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
             except TypeError:
-                model_kwargs.pop("output_attentions", None)
                 self.model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
 
         if hasattr(self.model, "resize_token_embeddings"):
@@ -142,6 +139,7 @@ class ModelAdapter:
         return tuple(eos)
 
     def encode(self, prompt: str) -> torch.LongTensor:
+        self._last_enable_thinking = None
         if self.use_chat_template and self._chat_template is not None:
             chat_kwargs: dict[str, Any] = {
                 "add_generation_prompt": True,
@@ -150,6 +148,11 @@ class ModelAdapter:
             }
             if self._chat_template_supports_enable_thinking:
                 chat_kwargs["enable_thinking"] = False
+            self._last_enable_thinking = chat_kwargs.get("enable_thinking")
+            print(
+                f"[ModelAdapter] enable_thinking={self._last_enable_thinking} "
+                f"(supports={self._chat_template_supports_enable_thinking})"
+            )
             encoded = self._chat_template(
                 [{"role": "user", "content": prompt}],
                 **chat_kwargs,
@@ -161,6 +164,14 @@ class ModelAdapter:
         if input_ids.dim() == 1:
             input_ids = input_ids.unsqueeze(0)
         return input_ids.to(self.device)
+
+    @property
+    def enable_thinking_status(self) -> Optional[bool]:
+        return self._last_enable_thinking
+
+    @property
+    def chat_template_supports_enable_thinking(self) -> bool:
+        return self._chat_template_supports_enable_thinking
 
     def _extract_input_ids(self, encoded: Any) -> torch.LongTensor:
         if isinstance(encoded, dict):
