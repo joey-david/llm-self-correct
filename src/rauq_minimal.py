@@ -33,7 +33,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "dtype": "auto",
     "attn_implementation": "eager",
     "output_attentions": True,
-    "use_chat_template": None,
+    "use_chat_template": True,
     "trust_remote_code": None,
     "store_all_heads": False,
     "seed": 42,  # the normie seed

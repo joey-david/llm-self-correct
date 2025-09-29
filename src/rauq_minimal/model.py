@@ -115,6 +115,11 @@ class ModelAdapter:
         self.model.config.output_attentions = self.output_attentions
         self.model.config.use_cache = True
         self.model.config.return_dict = True
+        if self.attn_implementation and hasattr(self.model, "set_default_attn_implementation"):
+            try:
+                self.model.set_default_attn_implementation(self.attn_implementation)
+            except Exception:
+                pass
 
         if hasattr(self.model, "generation_config") and self.model.generation_config is not None:
             gen_config = self.model.generation_config
@@ -196,6 +201,11 @@ class ModelAdapter:
             except TypeError:
                 forward_kwargs.pop("attn_implementation", None)
                 outputs = self.model(**forward_kwargs)
+
+        if self.output_attentions and getattr(outputs, "attentions", None) is None:
+            raise RuntimeError(
+                "Attentions are None. Ensure attn_implementation='eager' and disable flash attention backends."
+            )
 
         logits = outputs.logits[:, -1, :]
         log_probs = torch.log_softmax(logits, dim=-1)

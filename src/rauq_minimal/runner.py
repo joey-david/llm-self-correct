@@ -110,7 +110,7 @@ class Runner:
             self._debug_log_token(len(gen_token_ids), next_token_id, logp)
 
         current_input_ids = torch.tensor([[next_token_id]], dtype=torch.long, device=self.model_adapter.device)
-        token_mask = torch.ones_like(current_input_ids, dtype=torch.long, device=self.model_adapter.device)
+        token_mask = self._make_cumulative_mask(past, input_len=current_input_ids.shape[1])
         stop = self._should_stop(next_token_id)
 
         while len(gen_token_ids) < self.max_new_tokens and not stop:
@@ -128,6 +128,7 @@ class Runner:
                 self._debug_log_token(len(gen_token_ids), next_token_id, logp)
 
             current_input_ids = torch.tensor([[next_token_id]], dtype=torch.long, device=self.model_adapter.device)
+            token_mask = self._make_cumulative_mask(past, input_len=current_input_ids.shape[1])
             stop = self._should_stop(next_token_id)
 
         if gen_token_ids and a_prev_all_heads[-1] == {}:
@@ -138,7 +139,7 @@ class Runner:
                 _, _, attns, _ = self.model_adapter.step(
                     current_input_ids,
                     past_key_values=past,
-                    attention_mask=token_mask,
+                    attention_mask=self._make_cumulative_mask(past, input_len=current_input_ids.shape[1]),
                 )
             finally:
                 if prev_debug_state:
@@ -267,6 +268,37 @@ class Runner:
         num_layers = int(getattr(self.model_adapter.config, "num_hidden_layers", 0) or 0)
         num_heads = int(getattr(self.model_adapter.config, "num_attention_heads", 0) or 0)
         return {f"l{layer}": [0.0] * num_heads for layer in range(num_layers)}
+
+    def _make_cumulative_mask(self, past, input_len: int) -> torch.LongTensor:
+        """Return attention mask covering past cache + current input tokens."""
+        device = self.model_adapter.device
+        if past is None:
+            return torch.ones((1, input_len), dtype=torch.long, device=device)
+
+        if hasattr(past, "past_key_values"):
+            past = past.past_key_values
+
+        if not past:
+            return torch.ones((1, input_len), dtype=torch.long, device=device)
+
+        first_entry = past[0]
+        tensor_candidate = None
+        if isinstance(first_entry, (tuple, list)):
+            for item in first_entry:
+                if torch.is_tensor(item) and item.dim() >= 3:
+                    tensor_candidate = item
+                    break
+        elif torch.is_tensor(first_entry):
+            tensor_candidate = first_entry
+
+        if tensor_candidate is None:
+            raise RuntimeError("Unable to infer past length from past_key_values")
+
+        batch = tensor_candidate.shape[0]
+        past_len = tensor_candidate.shape[-2]
+        total_len = past_len + input_len
+        mask_device = tensor_candidate.device if tensor_candidate.device.type != "meta" else device
+        return torch.ones((batch, total_len), dtype=torch.long, device=mask_device)
 
     def _select_record_indices(self, input_path: str) -> Set[int]:
         indices: List[int] = []
