@@ -72,13 +72,6 @@ class Runner:
 
     def process_record(self, record: Dict) -> Dict:
         prompt = self.prompt_builder.build(record)
-        prompt_ids = self.model_adapter.encode(prompt)
-        prompt_mask = torch.ones_like(prompt_ids, dtype=torch.long, device=self.model_adapter.device)
-        print(
-            f"[Runner] enable_thinking status: {self.model_adapter.enable_thinking_status} "
-            f"(supports={self.model_adapter.chat_template_supports_enable_thinking})"
-        )
-
         if self.max_new_tokens <= 0:
             pred_text = ""
             pred_eval = self._make_pred_eval(record, pred_text)
@@ -87,18 +80,20 @@ class Runner:
                 "dataset": record.get("dataset"),
                 "prompt": prompt,
                 "pred_text": pred_text,
-                "pred_eval": pred_eval,
+                "answers": record.get("answers") or [],
                 "correct": self.scorer.score(record, pred_eval, raw_pred=pred_text),
                 "alpha": self.rauq.alpha,
                 "selected_heads": {},
-                "layers": [],
-                "u_per_layer": {},
-                "u_final": 0.0,
                 "u_token": [],
-                "a_prev_selected": [],
-                "logp_token": [],
-                "gen_token_ids": [],
+                "u_final": 0.0,
             }
+
+        prompt_ids = self.model_adapter.encode(prompt)
+        prompt_mask = torch.ones_like(prompt_ids, dtype=torch.long, device=self.model_adapter.device)
+        # print(
+        #     f"[Runner] enable_thinking status: {self.model_adapter.enable_thinking_status} "
+        #     f"(supports={self.model_adapter.chat_template_supports_enable_thinking})"
+        # )
 
         gen_token_ids: List[int] = []
         logp_token: List[float] = []
@@ -163,26 +158,19 @@ class Runner:
         correct = self.scorer.score(record, pred_eval, raw_pred=pred_text)
 
         selected_heads = self.head_selector.select_for_sequence(a_prev_all_heads)
-        layers = sorted(int(layer[1:]) for layer in selected_heads.keys()) if selected_heads else []
-        a_prev_selected = self._select_heads(a_prev_all_heads, selected_heads, layers)
-        u_per_layer, u_final, u_token = self.rauq.compute(logp_token, a_prev_selected)
+        u_final, u_token = self.rauq.compute(logp_token, a_prev_all_heads, selected_heads)
 
         result = {
             "id": record.get("id"),
             "dataset": record.get("dataset"),
             "prompt": prompt,
             "pred_text": pred_text,
-            "pred_eval": pred_eval,
+            "answers": record.get("answers") or [],
             "correct": correct,
             "alpha": self.rauq.alpha,
             "selected_heads": selected_heads,
-            "layers": layers,
-            "u_per_layer": u_per_layer,
-            "u_final": u_final,
             "u_token": u_token,
-            "a_prev_selected": a_prev_selected,
-            "logp_token": logp_token,
-            "gen_token_ids": gen_token_ids,
+            "u_final": u_final,
         }
 
         if self.store_all_heads:
@@ -220,27 +208,6 @@ class Runner:
                 values = layer_attn[:, last_query, prev_idx].detach().cpu().tolist()
             attn_per_layer[f"l{layer_idx}"] = [float(v) for v in values]
         return attn_per_layer
-
-    def _select_heads(
-        self,
-        a_prev_all_heads: List[Dict[str, List[float]]],
-        selected_heads: Dict[str, int],
-        layers: List[int],
-    ) -> List[Dict[str, float]]:
-        if not a_prev_all_heads:
-            return []
-
-        a_prev_selected: List[Dict[str, float]] = []
-        for token_heads in a_prev_all_heads:
-            layer_values: Dict[str, float] = {}
-            for layer_idx in layers:
-                key = f"l{layer_idx}"
-                head_idx = selected_heads.get(key, 0)
-                heads = token_heads.get(key, [])
-                value = float(heads[head_idx]) if head_idx < len(heads) else 0.0
-                layer_values[key] = value
-            a_prev_selected.append(layer_values)
-        return a_prev_selected
 
     def _make_pred_eval(self, record: Dict, pred_text: str) -> str:
         answer_type = (record.get("answer_type") or "open").lower()

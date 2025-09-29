@@ -13,43 +13,54 @@ class RAUQ:
     def compute(
         self,
         logp_token: List[float],
-        a_prev_selected: List[Dict[str, float]],
-    ) -> Tuple[Dict[str, float], float, List[float]]:
+        a_prev_all_heads: List[Dict[str, List[float]]],
+        selected_heads: Dict[str, int],
+    ) -> Tuple[float, List[float]]:
         if not logp_token:
-            return {}, 0.0, []
+            return 0.0, []
 
-        num_tokens = len(logp_token)
-        layers = sorted(a_prev_selected[0].keys()) if a_prev_selected else []
+        u_token: List[float] = []
+        c_state: Dict[str, float] = {}
+        sum_neg_log: Dict[str, float] = {}
+        layer_order = sorted(
+            selected_heads.keys(),
+            key=lambda k: (0, int(k[1:])) if k.startswith("l") and k[1:].isdigit() else (1, k),
+        )
 
-        c_per_layer: Dict[str, List[float]] = {layer: [] for layer in layers}
-        u_per_layer: Dict[str, float] = {}
-        u_token: List[float] = [0.0] * num_tokens
+        for idx, logp in enumerate(logp_token):
+            prob = max(min(math.exp(logp), 1.0), 1e-12)
+            token_heads = a_prev_all_heads[idx] if idx < len(a_prev_all_heads) else {}
+            token_max_u = 0.0
 
-        for i, logp in enumerate(logp_token):
-            prob = math.exp(logp)
-            for layer in layers:
-                if i == 0:
-                    c_val = max(min(prob, 1.0), 1e-12)
-                else:
-                    prev_c = c_per_layer[layer][i - 1]
-                    attn = float(a_prev_selected[i].get(layer, 0.0))
-                    c_val = self.alpha * prob + (1.0 - self.alpha) * attn * prev_c
-                    c_val = max(min(c_val, 1.0), 1e-12)
-                c_per_layer[layer].append(c_val)
-
-        for layer in layers:
-            c_values = c_per_layer[layer]
-            if not c_values:
-                u_per_layer[layer] = 0.0
+            if not layer_order:
+                token_max_u = -math.log(prob)
+                u_token.append(token_max_u)
                 continue
-            mean_log = sum(math.log(max(val, 1e-12)) for val in c_values) / num_tokens
-            u_per_layer[layer] = -mean_log
 
-        for idx in range(num_tokens):
-            per_layer_u = [
-                -math.log(max(c_per_layer[layer][idx], 1e-12)) for layer in layers
-            ]
-            u_token[idx] = max(per_layer_u) if per_layer_u else 0.0
+            for layer in layer_order:
+                head_idx = selected_heads.get(layer, 0)
+                heads = token_heads.get(layer, [])
+                attn = float(heads[head_idx]) if head_idx < len(heads) else 0.0
 
-        u_final = max(u_per_layer.values()) if u_per_layer else 0.0
-        return u_per_layer, u_final, u_token
+                if idx == 0:
+                    c_val = prob
+                else:
+                    prev_c = c_state.get(layer, prob)
+                    c_val = self.alpha * prob + (1.0 - self.alpha) * attn * prev_c
+
+                c_val = max(min(c_val, 1.0), 1e-12)
+                c_state[layer] = c_val
+
+                neg_log = -math.log(c_val)
+                sum_neg_log[layer] = sum_neg_log.get(layer, 0.0) + neg_log
+                token_max_u = max(token_max_u, neg_log)
+
+            u_token.append(token_max_u)
+
+        if not sum_neg_log:
+            u_final = max(u_token) if u_token else 0.0
+        else:
+            num_tokens = len(logp_token)
+            u_final = max(total / num_tokens for total in sum_neg_log.values())
+
+        return u_final, u_token

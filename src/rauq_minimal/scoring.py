@@ -130,7 +130,10 @@ class AnswerScorer:
         if answer_type != "open":
             if not answers_norm:
                 return False
-            return self._heuristic_match(answers_norm, pred_norm)
+            if self._heuristic_match(answers_norm, pred_norm):
+                return True
+            candidate = raw_pred if raw_pred is not None else pred_eval
+            return self._alignscore_match(record, candidate)
 
         heuristic_match = self._heuristic_match(answers_norm, pred_norm) if answers_norm else False
         if heuristic_match:
@@ -142,7 +145,9 @@ class AnswerScorer:
     def _heuristic_match(self, answers_norm: Iterable[str], pred_norm: str) -> bool:
         if not answers_norm or not pred_norm:
             return False
-        return pred_norm in {a.lower() for a in answers_norm}
+        norm_answers = {re.sub(r"\s+", " ", _PUNCT_RE.sub(" ", a.lower())).strip() for a in answers_norm}
+        pred_norm_clean = re.sub(r"\s+", " ", _PUNCT_RE.sub(" ", pred_norm.lower())).strip()
+        return pred_norm_clean in norm_answers
 
     def _alignscore_match(self, record: Dict, pred_text: str) -> bool:
         if not self.alignscore_model:
