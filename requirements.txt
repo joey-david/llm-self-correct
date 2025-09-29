@@ -7,3 +7,4 @@ ipykernel
 huggingface_hub
 datasets
 hf_transfer
+pyyaml

@@ -1,4 +1,4 @@
-# ignore pycache folders
+# pycache folders
 __pycache__/
 **/__pycache__/
 **/*.pyc
@@ -8,12 +8,12 @@ __pycache__/
 artifacts/
 checkpoints/
 
-# ignore conda environment files
+# conda environment files
 env/
 .venv/
 venv/
 .conda/
 .conda-env/
 
-# ignore articles and datasets
-literature/
+# all pdfs under lit/
+lit/**/*.pdf
