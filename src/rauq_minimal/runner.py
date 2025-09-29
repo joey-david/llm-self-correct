@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
+import math
 import random
-from typing import Dict, List
+from typing import Dict, List, Optional, Set
 
 import numpy as np
 import torch
@@ -26,6 +27,7 @@ class Runner:
         rauq: RAUQ,
         max_new_tokens: int,
         store_all_heads: bool = False,
+        dataset_fraction: float = 1.0,
     ) -> None:
         self.model_adapter = model_adapter
         self.prompt_builder = prompt_builder
@@ -34,12 +36,23 @@ class Runner:
         self.rauq = rauq
         self.max_new_tokens = max_new_tokens
         self.store_all_heads = store_all_heads
+        if dataset_fraction < 0.0 or dataset_fraction > 1.0:
+            raise ValueError("dataset_fraction must be between 0 and 1")
+        self.dataset_fraction = dataset_fraction
 
     def run(self, input_path: str, output_path: str) -> None:
+        selected_indices: Optional[Set[int]] = None
+        if 0.0 < self.dataset_fraction < 1.0:
+            selected_indices = self._select_record_indices(input_path)
+        elif self.dataset_fraction == 0.0:
+            selected_indices = set()
+
         with open(input_path, "r", encoding="utf-8") as fin, open(
             output_path, "w", encoding="utf-8"
         ) as fout:
-            for line in fin:
+            for idx, line in enumerate(fin):
+                if selected_indices is not None and idx not in selected_indices:
+                    continue
                 line = line.strip()
                 if not line:
                     continue
@@ -226,6 +239,26 @@ class Runner:
         num_layers = int(getattr(self.model_adapter.config, "num_hidden_layers", 0) or 0)
         num_heads = int(getattr(self.model_adapter.config, "num_attention_heads", 0) or 0)
         return {f"l{layer}": [0.0] * num_heads for layer in range(num_layers)}
+
+    def _select_record_indices(self, input_path: str) -> Set[int]:
+        indices: List[int] = []
+        with open(input_path, "r", encoding="utf-8") as fin:
+            for idx, line in enumerate(fin):
+                if line.strip():
+                    indices.append(idx)
+
+        if not indices:
+            return set()
+
+        target_count = int(math.ceil(len(indices) * self.dataset_fraction))
+        target_count = max(min(target_count, len(indices)), 0)
+        if target_count == len(indices):
+            return set(indices)
+        if target_count == 0:
+            return set()
+
+        chosen = set(random.sample(indices, target_count))
+        return chosen
 
 
 def set_seed(seed: int) -> None:
