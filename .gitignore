@@ -20,3 +20,6 @@ venv/
 
 # all pdfs under lit/
 lit/**/*.pdf
+
+# python testing file
+test.py

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 
 class RAUQ:
@@ -15,9 +15,9 @@ class RAUQ:
         logp_token: List[float],
         a_prev_all_heads: List[Dict[str, List[float]]],
         selected_heads: Dict[str, int],
-    ) -> Tuple[float, List[float]]:
+    ) -> Tuple[float, List[float], Optional[str], Optional[int]]:
         if not logp_token:
-            return 0.0, []
+            return 0.0, [], None, None
 
         u_token: List[float] = []
         c_state: Dict[str, float] = {}
@@ -59,8 +59,22 @@ class RAUQ:
 
         if not sum_neg_log:
             u_final = max(u_token) if u_token else 0.0
+            best_layer = None
         else:
             num_tokens = len(logp_token)
-            u_final = max(total / num_tokens for total in sum_neg_log.values())
+            best_layer = None
+            best_value = float("-inf")
+            for layer, total in sum_neg_log.items():
+                layer_u = total / num_tokens
+                if layer_u > best_value:
+                    best_value = layer_u
+                    best_layer = layer
+            u_final = best_value if best_layer is not None else 0.0
 
-        return u_final, u_token
+        best_head: Optional[int]
+        if best_layer is not None:
+            best_head = selected_heads.get(best_layer)
+        else:
+            best_head = None
+
+        return u_final, u_token, best_layer, best_head

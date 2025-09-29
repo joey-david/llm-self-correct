@@ -83,7 +83,8 @@ class Runner:
                 "answers": record.get("answers") or [],
                 "correct": self.scorer.score(record, pred_eval, raw_pred=pred_text),
                 "alpha": self.rauq.alpha,
-                "selected_heads": {},
+                "selected_layer": None,
+                "selected_head": None,
                 "u_token": [],
                 "u_final": 0.0,
             }
@@ -158,7 +159,9 @@ class Runner:
         correct = self.scorer.score(record, pred_eval, raw_pred=pred_text)
 
         selected_heads = self.head_selector.select_for_sequence(a_prev_all_heads)
-        u_final, u_token = self.rauq.compute(logp_token, a_prev_all_heads, selected_heads)
+        u_final, u_token, best_layer, best_head = self.rauq.compute(
+            logp_token, a_prev_all_heads, selected_heads
+        )
 
         result = {
             "id": record.get("id"),
@@ -168,13 +171,15 @@ class Runner:
             "answers": record.get("answers") or [],
             "correct": correct,
             "alpha": self.rauq.alpha,
-            "selected_heads": selected_heads,
+            "selected_layer": best_layer,
+            "selected_head": best_head,
             "u_token": u_token,
             "u_final": u_final,
         }
 
         if self.store_all_heads:
             result["a_prev_all_heads"] = a_prev_all_heads
+            result["selected_heads"] = selected_heads
 
         return result
 
