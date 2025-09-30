@@ -11,3 +11,4 @@ pyyaml
 alignscore-SpeedOfMagic
 python-dotenv
 tqdm
+dotenv

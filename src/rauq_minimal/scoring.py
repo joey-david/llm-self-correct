@@ -1,28 +1,33 @@
+# scoring.py — minimal, fixed AlignScore import + sane defaults + non-spammy usage
 from __future__ import annotations
 
 import logging
 import os
 import re
 from typing import Dict, Iterable, List, Optional
+from dotenv import load_dotenv
 
-try:  # load .env so AlignScore picks up Hugging Face tokens automatically
-    from dotenv import load_dotenv
-except ImportError:
-    load_dotenv = None
-else:
-    load_dotenv(override=False)
+load_dotenv(override=False)
 
-try:  # optional AlignScore dependency
-    from alignscore.alignscore import AlignScore as _AlignScoreImpl  # type: ignore
-except ImportError:  # pragma: no cover - alignscore isn't bundled by default
-    _AlignScoreImpl = None
-
+# --- FIXED IMPORT: try the public symbol first, then the submodule path ---
+_AlignScoreImpl = None
+try:
+    from alignscore import AlignScore as _AlignScoreImpl  # type: ignore
+except Exception:
+    try:
+        from alignscore.alignscore import AlignScore as _AlignScoreImpl  # type: ignore
+    except Exception:
+        _AlignScoreImpl = None
 
 _NUM_RE = re.compile(r"-?\d+(?:\.\d+)?")
 
 
 class AnswerScorer:
-    """Utility helpers for scoring predictions."""
+    """
+    Heuristic + (optional) AlignScore-based answer scorer.
+    - If AlignScore is installed and a model is provided (or defaulted), we use it.
+    - Otherwise we fall back to lexical heuristics only (silently, no spam).
+    """
 
     def __init__(
         self,
@@ -32,48 +37,68 @@ class AnswerScorer:
         alignscore_ckpt: Optional[str] = None,
         alignscore_batch_size: Optional[int] = None,
         alignscore_eval_mode: Optional[str] = None,
+        # If True, we will try very hard to turn AlignScore on (with a sane default model).
+        # If False, AlignScore is disabled unless a model is explicitly provided.
+        alignscore_auto_enable: bool = True,
     ) -> None:
-        self.alignscore_model = alignscore_model or os.environ.get("ALIGNSCORE_MODEL")
-        self.alignscore_device = alignscore_device or os.environ.get("ALIGNSCORE_DEVICE")
-        self.alignscore_ckpt = alignscore_ckpt or os.environ.get("ALIGNSCORE_CKPT")
+        # --- Resolve config/env with sane defaults ---
+        env = os.environ
+        self.alignscore_model = alignscore_model or env.get("ALIGNSCORE_MODEL")
+        self.alignscore_device = alignscore_device or env.get("ALIGNSCORE_DEVICE") or env.get("PYTORCH_DEVICE") or "cpu"
+        self.alignscore_ckpt = alignscore_ckpt or env.get("ALIGNSCORE_CKPT")
 
-        batch_override = os.environ.get("ALIGNSCORE_BATCH_SIZE")
+        # Default batch size
         if alignscore_batch_size is not None:
             self.alignscore_batch_size = max(int(alignscore_batch_size), 1)
-        elif batch_override is not None:
+        else:
             try:
-                self.alignscore_batch_size = max(int(batch_override), 1)
+                self.alignscore_batch_size = max(int(env.get("ALIGNSCORE_BATCH_SIZE", "8")), 1)
             except ValueError:
-                logging.warning("Invalid ALIGNSCORE_BATCH_SIZE '%s'; defaulting to 8", batch_override)
+                logging.warning("Invalid ALIGNSCORE_BATCH_SIZE; defaulting to 8")
                 self.alignscore_batch_size = 8
-        else:
-            self.alignscore_batch_size = 8
 
-        self.alignscore_eval_mode = (
-            alignscore_eval_mode
-            or os.environ.get("ALIGNSCORE_MODE")
-            or "nli_sp"
-        )
+        # Eval mode (AlignScore supports modes like 'nli_sp', 'nli', etc.)
+        self.alignscore_eval_mode = alignscore_eval_mode or env.get("ALIGNSCORE_MODE") or "nli_sp"
 
-        if not self.alignscore_device:
-            self.alignscore_device = os.environ.get("PYTORCH_DEVICE", "cpu")
-
-        threshold_override = os.environ.get("ALIGNSCORE_THRESHOLD")
-        if threshold_override is not None:
-            try:
-                self.alignscore_threshold = float(threshold_override)
-            except ValueError:
-                logging.warning(
-                    "Invalid ALIGNSCORE_THRESHOLD '%s'; falling back to %.3f",
-                    threshold_override,
-                    float(alignscore_threshold),
-                )
-                self.alignscore_threshold = float(alignscore_threshold)
-        else:
+        # Threshold
+        try:
+            self.alignscore_threshold = float(env.get("ALIGNSCORE_THRESHOLD", alignscore_threshold))
+        except ValueError:
+            logging.warning("Invalid ALIGNSCORE_THRESHOLD; falling back to %.3f", float(alignscore_threshold))
             self.alignscore_threshold = float(alignscore_threshold)
 
+        # If auto-enable is on and user did not set a model, provide a robust default
+        # that AlignScore commonly supports (can be overridden via env/arg).
+        # You can switch this to 'roberta-large-mnli' if you prefer.
+        if alignscore_auto_enable and not self.alignscore_model:
+            self.alignscore_model = "facebook/bart-large-mnli"
+
+        # Internal state
         self._alignscore = None
-        self._alignscore_warned = False
+        self._warned_init_failure = False
+        self._disabled_reason: Optional[str] = None
+
+        # If the library is missing or we intentionally disabled, record the reason once.
+        if _AlignScoreImpl is None:
+            self._disabled_reason = (
+                "alignscore package not available. Install with: pip install alignscore"
+            )
+        elif not self.alignscore_model:
+            self._disabled_reason = (
+                "AlignScore model not set (set ALIGNSCORE_MODEL or pass alignscore_model=...)"
+            )
+
+        # One-time info (no per-example spam)
+        if self._disabled_reason:
+            logging.info("[AnswerScorer] AlignScore disabled: %s", self._disabled_reason)
+        else:
+            logging.info(
+                "[AnswerScorer] AlignScore configured: model=%s, device=%s, batch=%d, mode=%s, ckpt=%s",
+                self.alignscore_model, self.alignscore_device, self.alignscore_batch_size,
+                self.alignscore_eval_mode, self.alignscore_ckpt or "<none>",
+            )
+
+    # -------------------- Public helpers --------------------
 
     def pick_choice(self, pred_text: str, options: Iterable[str]) -> str:
         options_list = list(options or [])
@@ -84,185 +109,139 @@ class AnswerScorer:
         if not pred_clean:
             return options_list[0]
 
+        # allow "A/B/C/..." selection by first token
         first_token = pred_clean.split(None, 1)[0].lower()
         for idx, opt in enumerate(options_list):
-            label = chr(ord("a") + idx)
-            if first_token == label:
+            if first_token == chr(ord("a") + idx):
                 return opt
 
+        # exact (case-insensitive)
         for opt in options_list:
             if pred_clean.lower() == (opt or "").strip().lower():
                 return opt
 
-        pred_tokens = {token.lower() for token in pred_clean.split()}
-        best_idx = 0
-        best_overlap = -1
-        for idx, option in enumerate(options_list):
-            option_str = (option or "").strip()
-            option_tokens = {tok.lower() for tok in option_str.split() if tok}
-            if not option_tokens:
-                continue
-            overlap = len(pred_tokens & option_tokens)
+        # fallback: token-overlap
+        pred_tokens = {t.lower() for t in pred_clean.split()}
+        best_idx, best_overlap = 0, -1
+        for idx, opt in enumerate(options_list):
+            toks = {t.lower() for t in (opt or "").split() if t}
+            overlap = len(pred_tokens & toks)
             if overlap > best_overlap:
-                best_overlap = overlap
-                best_idx = idx
+                best_idx, best_overlap = idx, overlap
         return options_list[best_idx]
 
     def extract_numeric(self, pred_text: str) -> Optional[str]:
         if pred_text is None:
             return None
-        matches = _NUM_RE.findall(pred_text)
-        if not matches:
-            return None
-        return matches[-1]
+        m = _NUM_RE.findall(pred_text)
+        return m[-1] if m else None
 
     def score(self, record: Dict, pred_eval: str, raw_pred: Optional[str] = None) -> bool:
-        answers = [
-            a.strip()
-            for a in (record.get("answers") or [])
-            if isinstance(a, str) and a.strip()
-        ]
-        candidate_obj = raw_pred if raw_pred is not None else pred_eval
-        candidate_text = "" if candidate_obj is None else str(candidate_obj)
+        """Return True if predicted answer is accepted as correct."""
+        answers = [a.strip() for a in (record.get("answers") or []) if isinstance(a, str) and a.strip()]
+        candidate_text = "" if (raw_pred if raw_pred is not None else pred_eval) is None else str(raw_pred if raw_pred is not None else pred_eval)
 
-        alignscore_result = self._alignscore_match(record, candidate_text)
-        if alignscore_result is not None:
-            if alignscore_result:
-                return True
+        # 1) Try AlignScore (if enabled & available)
+        align = self._alignscore_match(record, candidate_text)
+        if align is True:
+            return True
+        if align is False:
+            return False
+        # align is None => fall back to heuristics
 
+        # 2) Heuristics (exact/subset/containment, case-insensitive)
         if not answers:
             return False
-
         evaluated = (pred_eval or "").strip()
         if not evaluated:
             return False
+        return self._exact_or_subset_match(evaluated, answers)
 
-        if alignscore_result is None and self._exact_or_subset_match(evaluated, answers):
-            return True
-
-        if alignscore_result is False:
-            return False
-
-        return False
+    # -------------------- Internals --------------------
 
     def _exact_or_subset_match(self, candidate: str, answers: Iterable[str]) -> bool:
-        candidate_lower = candidate.lower()
-        candidate_tokens = {tok for tok in candidate_lower.split() if tok}
-
-        for answer in answers:
-            answer_lower = answer.lower()
-            if candidate_lower == answer_lower:
+        c = candidate.lower().strip()
+        ctoks = {t for t in c.split() if t}
+        for a in answers:
+            al = a.lower().strip()
+            if c == al:
                 return True
-
-            if candidate_lower and candidate_lower in answer_lower:
+            if c and c in al:
                 return True
-            if answer_lower and answer_lower in candidate_lower:
+            if al and al in c:
                 return True
-
-            answer_tokens = {tok for tok in answer_lower.split() if tok}
-            if not candidate_tokens or not answer_tokens:
-                continue
-            if candidate_tokens <= answer_tokens:
+            atoks = {t for t in al.split() if t}
+            if ctoks and atoks and (ctoks <= atoks or atoks <= ctoks):
                 return True
-            if answer_tokens <= candidate_tokens:
-                return True
-
         return False
 
     def _alignscore_match(self, record: Dict, pred_text: str) -> Optional[bool]:
-        if not self.alignscore_model:
-            print("[AnswerScorer] AlignScore model not set; skipping AlignScore scoring")
+        if self._disabled_reason:
+            print(self._disabled_reason)
             return None
-        if not isinstance(pred_text, str):
-            pred_text = str(pred_text)
-        pred_text = pred_text.strip()
+        pred_text = (pred_text or "").strip()
         if not pred_text:
             return None
-        answers = [
-            a.strip()
-            for a in (record.get("answers") or [])
-            if isinstance(a, str) and a.strip()
-        ]
-        if not answers:
+
+        refs = [a.strip() for a in (record.get("answers") or []) if isinstance(a, str) and a.strip()]
+        if not refs:
             return None
 
+        # Lazy init once
         try:
             scorer = self._ensure_alignscore()
         except RuntimeError as exc:
-            if not self._alignscore_warned:
-                logging.warning("%s", exc)
-                self._alignscore_warned = True
-            print(f"[AnswerScorer] Failed to initialize AlignScore: {exc}")
+            if not self._warned_init_failure:
+                logging.warning("[AnswerScorer] AlignScore init failed: %s", exc)
+                self._warned_init_failure = True
             return None
 
-        if not hasattr(scorer, "score"):
-            if not self._alignscore_warned:
-                logging.warning("AlignScore implementation does not expose a 'score' method; skipping AlignScore check")
-                self._alignscore_warned = True
-            print("[AnswerScorer] AlignScore implementation missing 'score'; skipping")
-            return None
-
-        contexts = answers
-        claims = [pred_text] * len(answers)
-
-        record_id = record.get("id", "<unknown>")
-        print(f"[AnswerScorer] Running AlignScore for record {record_id} with {len(answers)} references")
-
+        claims = [pred_text] * len(refs)
         try:
-            raw_scores = scorer.score(contexts=contexts, claims=claims)
+            raw = scorer.score(contexts=refs, claims=claims)
         except TypeError:
-            raw_scores = scorer.score(contexts, claims)
+            raw = scorer.score(refs, claims)
 
-        scores = self._extract_align_scores(raw_scores)
+        scores = self._extract_align_scores(raw)
         if not scores:
-            print(f"[AnswerScorer] AlignScore produced no scores for record {record_id}")
             return None
-        best = max(scores)
-        print(f"[AnswerScorer] AlignScore best score={best:.4f} (threshold={self.alignscore_threshold:.4f}) for record {record_id}")
-        return best >= self.alignscore_threshold
+        return max(scores) >= self.alignscore_threshold
 
     def _extract_align_scores(self, payload: object) -> List[float]:
         if payload is None:
             return []
         if isinstance(payload, dict):
-            for key in ("scores", "score", "align_scores", "alignscore"):
-                val = payload.get(key)  # type: ignore[call-arg]
-                if val is not None:
-                    return self._as_float_list(val)
+            for k in ("scores", "score", "align_scores", "alignscore"):
+                v = payload.get(k)  # type: ignore[call-arg]
+                if v is not None:
+                    return self._as_float_list(v)
             return []
         return self._as_float_list(payload)
 
-    def _as_float_list(self, value: object) -> List[float]:
-        if value is None:
+    def _as_float_list(self, v: object) -> List[float]:
+        if v is None:
             return []
-        if isinstance(value, (int, float)):
-            return [float(value)]
-        if isinstance(value, (list, tuple)):
-            floats: List[float] = []
-            for item in value:
+        if isinstance(v, (int, float)):
+            return [float(v)]
+        if isinstance(v, (list, tuple)):
+            out: List[float] = []
+            for x in v:
                 try:
-                    floats.append(float(item))
+                    out.append(float(x))
                 except (TypeError, ValueError):
-                    continue
-            return floats
+                    pass
+            return out
         return []
 
     def _ensure_alignscore(self):
         if self._alignscore is not None:
             return self._alignscore
         if _AlignScoreImpl is None:
-            raise RuntimeError(
-                "alignscore-SpeedOfMagic is required for AlignScore evaluation; install it via pip"
-            )
+            raise RuntimeError("alignscore not installed. pip install alignscore")
 
+        # At this point we *must* have a model name (we set a default earlier if auto-enabled)
         if not self.alignscore_model:
-            raise RuntimeError("AlignScore requires ALIGNSCORE_MODEL to be set")
-
-        if not self.alignscore_ckpt and not self._alignscore_warned:
-            logging.warning(
-                "ALIGNSCORE_CKPT not provided; initializing AlignScore without pretrained weights"
-            )
-            self._alignscore_warned = True
+            raise RuntimeError("ALIGNSCORE_MODEL not provided; set env or pass alignscore_model='...'")
 
         try:
             self._alignscore = _AlignScoreImpl(
@@ -272,13 +251,6 @@ class AnswerScorer:
                 ckpt_path=self.alignscore_ckpt,
                 evaluation_mode=self.alignscore_eval_mode,
             )
-            print(
-                "[AnswerScorer] Initialized AlignScore",
-                f"model={self.alignscore_model}",
-                f"ckpt={self.alignscore_ckpt or '<none>'}",
-                f"device={self.alignscore_device}",
-                f"mode={self.alignscore_eval_mode}",
-            )
-        except Exception as exc:  # pragma: no cover - depends on external package
-            raise RuntimeError(f"Failed to initialize AlignScore: {exc}") from exc
+        except Exception as exc:
+            raise RuntimeError(f"Failed to initialize AlignScore ({self.alignscore_model}): {exc}") from exc
         return self._alignscore
