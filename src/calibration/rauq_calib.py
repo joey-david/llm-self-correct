@@ -41,6 +41,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "head_calibration_samples": 32,
     "layer_band": "auto", # can be "auto", None, or (low, high) - the band of layers to use for RAUQ
     "debug_decode": False,
+    "debug_progress": False,
 }
 REQUIRED_KEYS = ("in", "out")
 
@@ -139,6 +140,13 @@ def main() -> None:
     else:
         debug_decode = debug_decode_opt
 
+    debug_progress_cfg = config.get("debug_progress", DEFAULT_CONFIG["debug_progress"])
+    debug_progress_opt = _coerce_optional_bool(debug_progress_cfg)
+    if debug_progress_opt is None:
+        debug_progress = bool(DEFAULT_CONFIG["debug_progress"])
+    else:
+        debug_progress = debug_progress_opt
+
     # select a band of layers to use - not too deep, not too shallow
     # can be "auto", None, or (low, high)
     layer_band_cfg = config.get("layer_band", DEFAULT_CONFIG["layer_band"])
@@ -173,6 +181,7 @@ def main() -> None:
         use_chat_template=use_chat_template,
         trust_remote_code=trust_remote_code,
         debug_decode=debug_decode,
+        debug_progress=debug_progress,
     )
     prompt_builder = PromptBuilder()
     scorer = AnswerScorer()

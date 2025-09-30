@@ -39,6 +39,7 @@ class Runner:
         dataset_fraction: float = 1.0,
         head_calibration_samples: int = 32,
         debug_decode: bool = False,
+        debug_progress: bool = False,
     ) -> None:
         self.model_adapter = model_adapter
         self.prompt_builder = prompt_builder
@@ -54,6 +55,7 @@ class Runner:
             raise ValueError("head_calibration_samples must be non-negative")
         self.head_calibration_samples = int(head_calibration_samples)
         self.debug_decode = debug_decode
+        self.debug_progress = debug_progress
 
     def run(self, input_path: str, output_path: str) -> None:
         selected_indices: Optional[Set[int]] = None
@@ -89,6 +91,11 @@ class Runner:
                 prompt = self.prompt_builder.build(record)
 
                 if calibration_active and not self.head_selector.is_ready():
+                    if self.debug_progress:
+                        print(
+                            f"[Runner] calibrating sample {len(calibration_buffer)+1}/"
+                            f"{self.head_calibration_samples} id={record.get('id')}"
+                        )
                     decode = self._decode_prompt(prompt)
                     self.head_selector.observe_sequence(decode.a_prev_all_heads)
                     calibration_buffer.append((record, prompt, decode))
@@ -101,6 +108,11 @@ class Runner:
                 if frozen_heads is None and self.head_selector.is_ready():
                     frozen_heads = self.head_selector.get_selected()
 
+                if self.debug_progress:
+                    print(
+                        f"[Runner] labeling idx={progress.n+1} id={record.get('id')} "
+                        f"dataset={record.get('dataset')}"
+                    )
                 result = self.process_record(
                     record,
                     prompt=prompt,
