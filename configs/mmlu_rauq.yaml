@@ -8,3 +8,4 @@ head_calibration_samples: 512
 dataset_fraction: 1.0
 store_all_heads: false
 layer_band: auto
+debug_progress: true

@@ -181,7 +181,6 @@ def main() -> None:
         use_chat_template=use_chat_template,
         trust_remote_code=trust_remote_code,
         debug_decode=debug_decode,
-        debug_progress=debug_progress,
     )
     prompt_builder = PromptBuilder()
     scorer = AnswerScorer()
@@ -219,6 +218,7 @@ def main() -> None:
             )
         ),
         debug_decode=debug_decode,
+        debug_progress=debug_progress,
     )
 
     runner.run(str(config["in"]), str(config["out"]))
