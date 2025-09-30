@@ -26,7 +26,7 @@ from rauq_minimal.runner import set_seed  # noqa: E402
 DEFAULT_CONFIG: Dict[str, Any] = {
     "in": "data/calibration/calibration_ds.jsonl",
     "out": "data/artifacts/rauq_output.jsonl",
-    "model": "Qwen/Qwen2.5-7B-Instruct",
+    "model": "Qwen/Qwen3-8B",
     "alpha": 0.2,  # as recommended in the paper
     "max_new": 256,  # to ensure full answers
     "device": "auto",
