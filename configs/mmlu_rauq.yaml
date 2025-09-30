@@ -2,9 +2,9 @@ in: data/calibration/mmlu_calibration_ds.jsonl
 out: data/artifacts/mmlu_rauq_output.jsonl
 model: Qwen/Qwen3-8B
 alpha: 0.2
-max_new: 128
+max_new: 256
 device: auto
-head_calibration_samples: 32
+head_calibration_samples: 512
 dataset_fraction: 1.0
 store_all_heads: false
 layer_band: auto

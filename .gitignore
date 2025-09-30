@@ -3,6 +3,7 @@ __pycache__/
 **/__pycache__/
 **/*.pyc
 **/*.pyo
+**/hf_cache/
 
 # artifacts
 artifacts/

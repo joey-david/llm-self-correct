@@ -1,6 +1,15 @@
 from __future__ import annotations
 import argparse, json, random, re
+import os
+from pathlib import Path
 from typing import Dict, List, Optional
+
+_CACHE_DIR = (Path(__file__).resolve().parents[2] / "data" / "hf_cache").resolve()
+_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("HF_HOME", str(_CACHE_DIR))
+os.environ.setdefault("HF_MODULES_CACHE", str((_CACHE_DIR / "modules").resolve()))
+os.environ.setdefault("HF_DATASETS_CACHE", str((_CACHE_DIR / "datasets").resolve()))
+
 from datasets import load_dataset, concatenate_datasets
 
 # Hyperparams / toggles
@@ -145,65 +154,136 @@ def load_strategyqa() -> List[dict]:
         out.append(make_record("strategyqa", ex.get("question",""), ans, "boolean", options=["yes","no"], split="train", source_id=i))
     return out
 
+MMLU_SUBJECTS = [
+    "abstract_algebra",
+    "astronomy",
+    "business_ethics",
+    "clinical_knowledge",
+    "college_biology",
+    "college_chemistry",
+    "college_computer_science",
+    "college_mathematics",
+    "college_medicine",
+    "college_physics",
+    "computer_security",
+    "conceptual_physics",
+    "econometrics",
+    "electrical_engineering",
+    "elementary_mathematics",
+    "formal_logic",
+    "global_facts",
+    "high_school_biology",
+    "high_school_chemistry",
+    "high_school_computer_science",
+    "high_school_european_history",
+    "high_school_geography",
+    "high_school_government_and_politics",
+    "high_school_macroeconomics",
+    "high_school_mathematics",
+    "high_school_microeconomics",
+    "high_school_physics",
+    "high_school_psychology",
+    "high_school_statistics",
+    "high_school_us_history",
+    "high_school_world_history",
+    "human_aging",
+    "human_sexuality",
+    "international_law",
+    "jurisprudence",
+    "logical_fallacies",
+    "machine_learning",
+    "management",
+    "marketing",
+    "medical_genetics",
+    "miscellaneous",
+    "moral_disputes",
+    "moral_scenarios",
+    "nutrition",
+    "philosophy",
+    "prehistory",
+    "professional_accounting",
+    "professional_law",
+    "professional_medicine",
+    "professional_psychology",
+    "public_relations",
+    "security_studies",
+    "sociology",
+    "us_foreign_policy",
+    "virology",
+    "world_religions",
+]
+
+
 def load_mmlu() -> List[dict]:
     """Load the MMLU benchmark across subjects as multiple-choice QA."""
     out: List[dict] = []
-    # Preferred configuration: combined dataset with explicit split
-    try:
-        ds = load_dataset("lukaemon/mmlu", "all", split="dev")
-    except Exception:
-        # Fallback to hendrycksTest subjects if the combined config is unavailable
-        subjects = [
-            "abstract_algebra",
-            "astronomy",
-            "college_biology",
-            "college_computer_science",
-            "college_physics",
-            "global_facts",
-            "high_school_chemistry",
-            "high_school_mathematics",
-            "high_school_physics",
-            "machine_learning",
-        ]
-        parts = []
-        for subj in subjects:
-            try:
-                part = load_dataset("hendrycksTest", subj, split="test")
-                parts.append(part)
-            except Exception:
+    parts = []
+    for subj in MMLU_SUBJECTS:
+        try:
+            part = load_dataset(
+                "lukaemon/mmlu",
+                subj,
+                split="test",
+                trust_remote_code=True,
+                cache_dir=str(_CACHE_DIR),
+            )
+            if len(part) == 0:
+                print(f"[compile_calib] lukaemon/mmlu/{subj} returned empty split; skipping")
                 continue
-        if not parts:
-            return out
-        ds = concatenate_datasets(parts)
+            # Annotate with subject for downstream grouping
+            part = part.add_column("subject", [subj] * len(part))
+            print(f"[compile_calib] Loaded lukaemon/mmlu/{subj} with {len(part)} records")
+            parts.append(part)
+        except Exception as exc:
+            print(f"[compile_calib] lukaemon/mmlu/{subj} load failed: {exc}")
+            continue
 
-    for idx in range(len(ds)):
-        ex = ds[idx]
-        question = ex.get("question", "")
-        raw_choices = ex.get("choices") or ex.get("options") or []
-        options = [str(c) for c in raw_choices]
-        answer = ex.get("answer")
+    if not parts:
+        print("[compile_calib] No MMLU subjects loaded (network access required).")
+        return out
+
+    ds = concatenate_datasets(parts)
+    print(f"[compile_calib] Concatenated MMLU with {len(ds)} records")
+
+    for idx, ex in enumerate(ds):
+        question = ex.get("input") or ex.get("question") or ""
+        options: List[str] = []
+        # columns A/B/C/D store the multiple choice answers
+        for key in ("A", "B", "C", "D"):
+            val = ex.get(key)
+            if isinstance(val, str) and val.strip():
+                options.append(val.strip())
+        if not options:
+            raw_choices = ex.get("choices") or ex.get("options") or []
+            options = [str(c) for c in raw_choices if isinstance(c, str)]
+
+        answer = ex.get("target") or ex.get("answer")
         gold: List[str] = []
-        if isinstance(answer, str) and options:
-            first_char = answer.strip()[:1].upper()
-            if first_char and "A" <= first_char <= "Z":
-                pos = ord(first_char) - ord("A")
+        if isinstance(answer, str):
+            ans_clean = answer.strip()
+            if options and len(ans_clean) == 1 and "A" <= ans_clean <= "D":
+                pos = ord(ans_clean) - ord("A")
                 if 0 <= pos < len(options):
                     gold.append(options[pos])
+            elif ans_clean:
+                gold.append(ans_clean)
         elif isinstance(answer, int) and 0 <= answer < len(options):
             gold.append(options[int(answer)])
+
         meta = {
             "subject": ex.get("subject"),
+            "split": ex.get("split"),
         }
         out.append(
             make_record(
                 "mmlu",
-                question,
+                str(question),
                 gold,
                 "choice",
                 options=options,
                 split=str(ex.get("split", "")),
                 meta=meta,
-                source_id=idx,
+                source_id=ex.get("id", idx),
             )
         )
     return out
