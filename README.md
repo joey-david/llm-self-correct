@@ -9,3 +9,8 @@ run on benchmarks to see improvement, don't highlight sheer performance but effi
 finetune with qlora for cot use mid-generation and not simply at the start.
 add more tasks (summarization, etc)
 run multiple cot generations and pick best with alignscore (mcts?)
+
+### Plots / Diagnostics
+- After generating `data/artifacts/rauq_output.jsonl`, run:
+  `python data/plot_rauq_dashboard.py --infile data/artifacts/rauq_output.jsonl --outdir data/plots`
+- This saves a suite of graphs (ROC/PR, histograms, per-dataset AUC/accuracy, token-level dynamics, layer/head distributions, gating trade-offs) and a short `insights.txt` under `data/plots`.

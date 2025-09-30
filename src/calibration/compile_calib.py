@@ -10,11 +10,11 @@ CFG = {
     # Enable/disable datasets here.
     "enable": {
         "truthfulqa": True,
-        "triviaqa": False,
-        "commonsenseqa": False,
-        "openbookqa": False,
-        "ai2_arc": False,
-        "strategyqa": False,
+        "triviaqa": True,
+        "commonsenseqa": True,
+        "openbookqa": True,
+        "ai2_arc": True,
+        "strategyqa": True,
         "gsm8k": False,
         "popqa": False,
         "hotpotqa_distractor": False,
@@ -34,7 +34,7 @@ CFG = {
         "squad_v2_unanswerable": None,
     },
     # If you prefer a global target size, set an int here (None = no global cap)
-    "total_target": None,
+    "total_target": 5000,
 }
 
 random.seed(CFG["seed"])

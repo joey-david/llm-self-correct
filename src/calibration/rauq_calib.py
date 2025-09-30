@@ -26,7 +26,7 @@ from rauq_minimal.runner import set_seed  # noqa: E402
 DEFAULT_CONFIG: Dict[str, Any] = {
     "in": "data/calibration/calibration_ds.jsonl",
     "out": "data/artifacts/rauq_output.jsonl",
-    "model": "Qwen/Qwen3-8B",
+    "model": "Qwen/Qwen2.5-7B-Instruct",
     "alpha": 0.2,  # as recommended in the paper
     "max_new": 256,  # to ensure full answers
     "device": "auto",
@@ -37,7 +37,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "trust_remote_code": None,
     "store_all_heads": False,
     "seed": 42,  # the normie seed
-    "dataset_fraction": 0.5,  # start with half for speed
+    "dataset_fraction": 1.0, # all of it
     "head_calibration_samples": 32,
     "layer_band": "auto", # can be "auto", None, or (low, high) - the band of layers to use for RAUQ
     "debug_decode": False,

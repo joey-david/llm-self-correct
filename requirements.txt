@@ -3,6 +3,7 @@ transformers
 datasets
 scikit-learn
 numpy
+matplotlib
 ipykernel
 huggingface_hub
 datasets
@@ -13,3 +14,4 @@ python-dotenv
 tqdm
 dotenv
 spacy>=3.6,<4
+matplotlib
