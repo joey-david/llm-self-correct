@@ -194,6 +194,8 @@ class AnswerScorer:
                 logging.warning("[AnswerScorer] AlignScore init failed: %s", exc)
                 self._warned_init_failure = True
             print(f"[AnswerScorer] AlignScore init failed: {exc}")
+            # Avoid re-attempting every record; mark disabled for this run
+            self._disabled_reason = f"init failed: {exc}"
             return None
 
         claims = [pred_text] * len(refs)
@@ -249,6 +251,14 @@ class AnswerScorer:
         if not self.alignscore_model:
             raise RuntimeError("AlignScore backbone not provided; pass alignscore_model='roberta-large' or 'roberta-base'")
 
+        # Ensure spaCy English model is available (AlignScore requires it)
+        try:
+            self._ensure_spacy_en()
+        except Exception as spacy_exc:
+            raise RuntimeError(
+                f"spaCy 'en_core_web_sm' model missing and auto-download failed: {spacy_exc}"
+            )
+
         # Ensure checkpoint exists: attempt download if missing
         ckpt_path = Path(self.alignscore_ckpt)
         if not ckpt_path.is_file():
@@ -258,13 +268,49 @@ class AnswerScorer:
                 raise RuntimeError(f"Checkpoint not found after download attempt: {ckpt_path}")
 
         try:
-            self._alignscore = _AlignScoreImpl(
-                model=self.alignscore_model,
-                batch_size=self.alignscore_batch_size,
-                device=self.alignscore_device or "cpu",
-                ckpt_path=self.alignscore_ckpt,
-                evaluation_mode=self.alignscore_eval_mode,
-            )
+            # Temporarily silence third-party loggers (Transformers/PL) to hide
+            # benign init warnings like uninitialized pooler weights and PL checkpoint upgrade.
+            _hf_logging = None
+            _prev_hf_level = None
+            _pl_logger = None
+            _prev_pl_level = None
+            try:
+                from transformers.utils import logging as _hf_logging  # type: ignore
+
+                _prev_hf_level = _hf_logging.get_verbosity()
+                _hf_logging.set_verbosity_error()
+            except Exception:
+                _hf_logging = None  # type: ignore
+                _prev_hf_level = None
+            try:
+                import logging as _pylogging
+
+                _pl_logger = _pylogging.getLogger("pytorch_lightning")
+                _prev_pl_level = _pl_logger.level
+                _pl_logger.setLevel(_pylogging.ERROR)
+            except Exception:
+                _pl_logger = None
+                _prev_pl_level = None
+
+            try:
+                self._alignscore = _AlignScoreImpl(
+                    model=self.alignscore_model,
+                    batch_size=self.alignscore_batch_size,
+                    device=self.alignscore_device or "cpu",
+                    ckpt_path=self.alignscore_ckpt,
+                    evaluation_mode=self.alignscore_eval_mode,
+                )
+            finally:
+                try:
+                    if _hf_logging is not None and _prev_hf_level is not None:
+                        _hf_logging.set_verbosity(_prev_hf_level)
+                except Exception:
+                    pass
+                try:
+                    if _pl_logger is not None and _prev_pl_level is not None:
+                        _pl_logger.setLevel(_prev_pl_level)
+                except Exception:
+                    pass
             print(
                 "[AnswerScorer] Initialized AlignScore",
                 f"model={self.alignscore_model}",
@@ -276,6 +322,29 @@ class AnswerScorer:
         except Exception as exc:
             raise RuntimeError(f"Failed to initialize AlignScore ({self.alignscore_model}): {exc}") from exc
         return self._alignscore
+
+    def _ensure_spacy_en(self) -> None:
+        """Ensure spaCy and the 'en_core_web_sm' model are available."""
+        try:
+            import spacy  # type: ignore
+        except Exception as exc:
+            raise RuntimeError("spaCy is not installed") from exc
+
+        try:
+            spacy.load("en_core_web_sm")
+            return
+        except Exception:
+            print("[AnswerScorer] spaCy model 'en_core_web_sm' not found; attempting download...")
+            try:
+                from spacy.cli import download as spacy_download  # type: ignore
+
+                spacy_download("en_core_web_sm")
+                # Verify
+                spacy.load("en_core_web_sm")
+                print("[AnswerScorer] spaCy model 'en_core_web_sm' installed.")
+                return
+            except Exception as exc:
+                raise RuntimeError(f"Failed to download/load 'en_core_web_sm': {exc}") from exc
 
     def _download_ckpt(self, dest: Path, backbone: str) -> None:
         """Download AlignScore checkpoint to `dest` (HF hub preferred, HTTPS fallback)."""
