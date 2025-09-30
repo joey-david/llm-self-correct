@@ -83,6 +83,8 @@ class AnswerScorer:
         self._disabled_reason: Optional[str] = None if _AlignScoreImpl is not None else (
             "alignscore package not available. Install with: pip install alignscore-SpeedOfMagic"
         )
+        # Expose last computed AlignScore best value for downstream logging/output
+        self.last_alignscore_score: Optional[float] = None
 
         # One-time info
         if self._disabled_reason:
@@ -137,6 +139,8 @@ class AnswerScorer:
 
     def score(self, record: Dict, pred_eval: str, raw_pred: Optional[str] = None) -> bool:
         """Return True if predicted answer is accepted as correct."""
+        # Reset per-call details
+        self.last_alignscore_score = None
         answers = [a.strip() for a in (record.get("answers") or []) if isinstance(a, str) and a.strip()]
         candidate_text = "" if (raw_pred if raw_pred is not None else pred_eval) is None else str(raw_pred if raw_pred is not None else pred_eval)
 
@@ -210,6 +214,8 @@ class AnswerScorer:
         if not scores:
             return None
         best = max(scores)
+        # Store for downstream use in outputs
+        self.last_alignscore_score = float(best)
         print(
             f"[AnswerScorer] AlignScore best score={best:.4f} (threshold={self.alignscore_threshold:.4f}) for {rec_id}"
         )
