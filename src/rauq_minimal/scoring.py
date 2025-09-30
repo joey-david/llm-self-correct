@@ -127,7 +127,8 @@ class AnswerScorer:
 
         alignscore_result = self._alignscore_match(record, candidate_text)
         if alignscore_result is not None:
-            return alignscore_result
+            if alignscore_result:
+                return True
 
         if not answers:
             return False
@@ -136,14 +137,41 @@ class AnswerScorer:
         if not evaluated:
             return False
 
-        evaluated_lower = evaluated.lower()
+        if alignscore_result is None and self._exact_or_subset_match(evaluated, answers):
+            return True
+
+        if alignscore_result is False:
+            return False
+
+        return False
+
+    def _exact_or_subset_match(self, candidate: str, answers: Iterable[str]) -> bool:
+        candidate_lower = candidate.lower()
+        candidate_tokens = {tok for tok in candidate_lower.split() if tok}
+
         for answer in answers:
-            if evaluated_lower == answer.lower():
+            answer_lower = answer.lower()
+            if candidate_lower == answer_lower:
                 return True
+
+            if candidate_lower and candidate_lower in answer_lower:
+                return True
+            if answer_lower and answer_lower in candidate_lower:
+                return True
+
+            answer_tokens = {tok for tok in answer_lower.split() if tok}
+            if not candidate_tokens or not answer_tokens:
+                continue
+            if candidate_tokens <= answer_tokens:
+                return True
+            if answer_tokens <= candidate_tokens:
+                return True
+
         return False
 
     def _alignscore_match(self, record: Dict, pred_text: str) -> Optional[bool]:
         if not self.alignscore_model:
+            print("[AnswerScorer] AlignScore model not set; skipping AlignScore scoring")
             return None
         if not isinstance(pred_text, str):
             pred_text = str(pred_text)
@@ -164,16 +192,21 @@ class AnswerScorer:
             if not self._alignscore_warned:
                 logging.warning("%s", exc)
                 self._alignscore_warned = True
+            print(f"[AnswerScorer] Failed to initialize AlignScore: {exc}")
             return None
 
         if not hasattr(scorer, "score"):
             if not self._alignscore_warned:
                 logging.warning("AlignScore implementation does not expose a 'score' method; skipping AlignScore check")
                 self._alignscore_warned = True
+            print("[AnswerScorer] AlignScore implementation missing 'score'; skipping")
             return None
 
         contexts = answers
         claims = [pred_text] * len(answers)
+
+        record_id = record.get("id", "<unknown>")
+        print(f"[AnswerScorer] Running AlignScore for record {record_id} with {len(answers)} references")
 
         try:
             raw_scores = scorer.score(contexts=contexts, claims=claims)
@@ -182,8 +215,10 @@ class AnswerScorer:
 
         scores = self._extract_align_scores(raw_scores)
         if not scores:
+            print(f"[AnswerScorer] AlignScore produced no scores for record {record_id}")
             return None
         best = max(scores)
+        print(f"[AnswerScorer] AlignScore best score={best:.4f} (threshold={self.alignscore_threshold:.4f}) for record {record_id}")
         return best >= self.alignscore_threshold
 
     def _extract_align_scores(self, payload: object) -> List[float]:
@@ -236,6 +271,13 @@ class AnswerScorer:
                 device=self.alignscore_device or "cpu",
                 ckpt_path=self.alignscore_ckpt,
                 evaluation_mode=self.alignscore_eval_mode,
+            )
+            print(
+                "[AnswerScorer] Initialized AlignScore",
+                f"model={self.alignscore_model}",
+                f"ckpt={self.alignscore_ckpt or '<none>'}",
+                f"device={self.alignscore_device}",
+                f"mode={self.alignscore_eval_mode}",
             )
         except Exception as exc:  # pragma: no cover - depends on external package
             raise RuntimeError(f"Failed to initialize AlignScore: {exc}") from exc
