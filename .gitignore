@@ -7,6 +7,7 @@ __pycache__/
 # artifacts
 artifacts/
 checkpoints/
+data/plots
 
 # conda environment files
 env/
@@ -20,6 +21,3 @@ venv/
 
 # all pdfs under lit/
 lit/**/*.pdf
-
-# python testing file
-test.py
