@@ -1,4 +1,4 @@
-in: data/calibration/mmlu_calibration_ds.jsonl
+in: data/calibration/mmlu_calib.jsonl
 out: data/artifacts/mmlu_rauq_output.jsonl
 model: Qwen/Qwen3-8B
 alpha: 0.2
