@@ -87,7 +87,7 @@ class ModelAdapter:
         if self.trust_remote_code:
             model_kwargs["trust_remote_code"] = True
         if isinstance(self.dtype, torch.dtype):
-            model_kwargs["torch_dtype"] = self.dtype
+            model_kwargs["dtype"] = self.dtype
         if self.attn_implementation:
             model_kwargs["attn_implementation"] = self.attn_implementation
         try:

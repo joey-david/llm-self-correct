@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import logging
-import os
 import re
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
+import spacy
 
-# --- FIXED IMPORT: try the public symbol first, then the submodule path ---
+
 _AlignScoreImpl = None
 try:
     from alignscore import AlignScore as _AlignScoreImpl  # type: ignore
@@ -295,7 +295,6 @@ class AnswerScorer:
                 repo_id=_HF_REPO,
                 filename=ckpt_name,
                 local_dir=str(dest.parent),
-                local_dir_use_symlinks=False,
             )
             downloaded_path = Path(downloaded)
             # Ensure final path matches expected dest (robust across FS boundaries)
