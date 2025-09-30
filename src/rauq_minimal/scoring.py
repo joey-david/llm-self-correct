@@ -259,6 +259,14 @@ class AnswerScorer:
                 f"spaCy 'en_core_web_sm' model missing and auto-download failed: {spacy_exc}"
             )
 
+        # Ensure NLTK punkt resources are available (AlignScore uses sent_tokenize)
+        try:
+            self._ensure_nltk_punkt()
+        except Exception as nltk_exc:
+            raise RuntimeError(
+                f"NLTK 'punkt' resources missing and auto-download failed: {nltk_exc}"
+            )
+
         # Ensure checkpoint exists: attempt download if missing
         ckpt_path = Path(self.alignscore_ckpt)
         if not ckpt_path.is_file():
@@ -292,25 +300,42 @@ class AnswerScorer:
                 _pl_logger = None
                 _prev_pl_level = None
 
-            try:
-                self._alignscore = _AlignScoreImpl(
-                    model=self.alignscore_model,
-                    batch_size=self.alignscore_batch_size,
-                    device=self.alignscore_device or "cpu",
-                    ckpt_path=self.alignscore_ckpt,
-                    evaluation_mode=self.alignscore_eval_mode,
+            import warnings as _pywarnings
+            with _pywarnings.catch_warnings():
+                _pywarnings.filterwarnings(
+                    "ignore",
+                    message=r"^Some weights of RobertaModel were not initialized",
+                    module=r"transformers.*",
                 )
-            finally:
+                _pywarnings.filterwarnings(
+                    "ignore",
+                    message=r"^Lightning automatically upgraded your loaded checkpoint",
+                    module=r"pytorch_lightning.*",
+                )
+                _pywarnings.filterwarnings(
+                    "ignore",
+                    message=r"^Found keys that are not in the model state dict",
+                    module=r"pytorch_lightning.*",
+                )
                 try:
-                    if _hf_logging is not None and _prev_hf_level is not None:
-                        _hf_logging.set_verbosity(_prev_hf_level)
-                except Exception:
-                    pass
-                try:
-                    if _pl_logger is not None and _prev_pl_level is not None:
-                        _pl_logger.setLevel(_prev_pl_level)
-                except Exception:
-                    pass
+                    self._alignscore = _AlignScoreImpl(
+                        model=self.alignscore_model,
+                        batch_size=self.alignscore_batch_size,
+                        device=self.alignscore_device or "cpu",
+                        ckpt_path=self.alignscore_ckpt,
+                        evaluation_mode=self.alignscore_eval_mode,
+                    )
+                finally:
+                    try:
+                        if _hf_logging is not None and _prev_hf_level is not None:
+                            _hf_logging.set_verbosity(_prev_hf_level)
+                    except Exception:
+                        pass
+                    try:
+                        if _pl_logger is not None and _prev_pl_level is not None:
+                            _pl_logger.setLevel(_prev_pl_level)
+                    except Exception:
+                        pass
             print(
                 "[AnswerScorer] Initialized AlignScore",
                 f"model={self.alignscore_model}",
@@ -345,6 +370,46 @@ class AnswerScorer:
                 return
             except Exception as exc:
                 raise RuntimeError(f"Failed to download/load 'en_core_web_sm': {exc}") from exc
+
+    def _ensure_nltk_punkt(self) -> None:
+        """Ensure NLTK 'punkt' (and 'punkt_tab' for newer NLTK) are available."""
+        try:
+            import nltk  # type: ignore
+        except Exception as exc:
+            raise RuntimeError("NLTK is not installed") from exc
+
+        def _has_resource(spec: str) -> bool:
+            try:
+                nltk.data.find(spec)
+                return True
+            except LookupError:
+                return False
+
+        needed: list[str] = []
+        # Classic punkt
+        if not _has_resource("tokenizers/punkt"):
+            needed.append("punkt")
+        # Newer NLTK splits: punkt_tab
+        if not _has_resource("tokenizers/punkt_tab"):
+            needed.append("punkt_tab")
+        if not needed:
+            return
+        print(f"[AnswerScorer] NLTK resources missing {needed}; attempting download...")
+        for name in needed:
+            try:
+                nltk.download(name, quiet=True)
+            except Exception as exc:
+                raise RuntimeError(f"Failed to download NLTK '{name}': {exc}") from exc
+        # Verify
+        missing_after = [
+            name for name in needed
+            if not (
+                _has_resource("tokenizers/punkt") if name == "punkt" else _has_resource("tokenizers/punkt_tab")
+            )
+        ]
+        if missing_after:
+            raise RuntimeError(f"NLTK resources still missing after download: {missing_after}")
+        print("[AnswerScorer] NLTK 'punkt' resources installed.")
 
     def _download_ckpt(self, dest: Path, backbone: str) -> None:
         """Download AlignScore checkpoint to `dest` (HF hub preferred, HTTPS fallback)."""
