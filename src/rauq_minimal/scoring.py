@@ -19,7 +19,7 @@ except Exception:
 _NUM_RE = re.compile(r"-?\d+(?:\.\d+)?")
 
 # Embedded defaults for AlignScore usage (no .env or shell needed)
-_DEFAULT_MODEL = "roberta-large"  # or "roberta-base"
+_DEFAULT_MODEL = "roberta-base"  # default to smaller model by request
 _DEFAULT_EVAL_MODE = "nli_sp"
 _DEFAULT_BATCH_SIZE = 16
 _DEFAULT_THRESHOLD = 0.5
@@ -285,12 +285,28 @@ class AnswerScorer:
         # Try huggingface_hub first
         try:
             from huggingface_hub import hf_hub_download  # type: ignore
+            import shutil
 
             print(
                 f"[AnswerScorer] Downloading via huggingface_hub: repo={_HF_REPO}, file={ckpt_name}"
             )
-            downloaded = hf_hub_download(repo_id=_HF_REPO, filename=ckpt_name)
-            Path(downloaded).replace(dest)
+            # Place the file directly under our checkpoints dir (no symlinks)
+            downloaded = hf_hub_download(
+                repo_id=_HF_REPO,
+                filename=ckpt_name,
+                local_dir=str(dest.parent),
+                local_dir_use_symlinks=False,
+            )
+            downloaded_path = Path(downloaded)
+            # Ensure final path matches expected dest (robust across FS boundaries)
+            if downloaded_path.resolve() != dest.resolve():
+                try:
+                    shutil.move(str(downloaded_path), str(dest))
+                except Exception:
+                    shutil.copy2(str(downloaded_path), str(dest))
+            # Double-check file exists
+            if not dest.is_file():
+                raise RuntimeError(f"Failed to place checkpoint at {dest}")
             return
         except Exception as hub_exc:
             print(f"[AnswerScorer] huggingface_hub unavailable or failed: {hub_exc}")
