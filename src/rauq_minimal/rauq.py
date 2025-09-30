@@ -7,7 +7,7 @@ from typing import Dict, List, Optional, Tuple
 class RAUQ:
     """Compute RAUQ uncertainty metrics for a decoded sequence."""
 
-    def __init__(self, alpha: float = 0.3, layer_band: Optional[Tuple[int, int]] = None) -> None:
+    def __init__(self, alpha: float = 0.2, layer_band: Optional[Tuple[int, int]] = None) -> None:
         self.alpha = alpha
         if layer_band is not None:
             low, high = layer_band

@@ -8,12 +8,14 @@ class HeadSelector:
 
     def __init__(self) -> None:
         self._totals: Dict[str, List[float]] = {}
+        self._counts: Dict[str, List[int]] = {}
         self._head_counts: Dict[str, int] = {}
         self._selected: Optional[Dict[str, int]] = None
         self._num_sequences: int = 0
 
     def reset(self) -> None:
         self._totals.clear()
+        self._counts.clear()
         self._head_counts.clear()
         self._selected = None
         self._num_sequences = 0
@@ -42,14 +44,18 @@ class HeadSelector:
                 continue
 
             totals = self._totals.setdefault(layer, [0.0] * head_counts)
+            counts = self._counts.setdefault(layer, [0] * head_counts)
             if len(totals) < head_counts:
                 totals.extend([0.0] * (head_counts - len(totals)))
+            if len(counts) < head_counts:
+                counts.extend([0] * (head_counts - len(counts)))
 
             for token_idx in range(1, num_tokens):
                 heads = a_prev_all_heads[token_idx].get(layer, [])
                 upto = min(len(heads), head_counts)
                 for h_idx in range(upto):
                     totals[h_idx] += float(heads[h_idx])
+                    counts[h_idx] += 1
 
         self._num_sequences += 1
 
@@ -67,18 +73,29 @@ class HeadSelector:
         for layer in sorted(all_layers):
             head_count = self._head_counts.get(layer, 0)
             totals = self._totals.get(layer, [])
+            counts = self._counts.get(layer, [])
             if head_count == 0:
                 selected[layer] = 0
                 continue
 
             if len(totals) < head_count:
                 totals = totals + [0.0] * (head_count - len(totals))
+            if len(counts) < head_count:
+                counts = counts + [0] * (head_count - len(counts))
 
-            if not any(totals):
-                selected[layer] = 0
+            # Compute mean attention per head; skip heads never observed
+            means: List[float] = []
+            for total, count in zip(totals, counts):
+                if count <= 0:
+                    means.append(float("-inf"))
+                else:
+                    means.append(total / count)
+
+            if all(m == float("-inf") for m in means):
+                # No signal collected for this layer; skip entirely
                 continue
 
-            best_idx = max(range(len(totals)), key=totals.__getitem__)
+            best_idx = max(range(len(means)), key=means.__getitem__)
             selected[layer] = int(best_idx)
 
         self._selected = selected

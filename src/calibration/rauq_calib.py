@@ -182,9 +182,12 @@ def main() -> None:
     if auto_layer_band:
         num_layers = int(getattr(model_adapter.config, "num_hidden_layers", 0) or 0)
         if num_layers > 0:
-            low = max(0, (num_layers // 3)*2-1)
-            high = max(low, num_layers - num_layers // 6 - 1)
-            high = min(high, num_layers - 1)
+            # Paper selects layers from the middle region of the transformer stack.
+            third = max(1, num_layers // 3)
+            low = max(0, third - 1)
+            high = min(num_layers - 1, num_layers - third)
+            if high < low:
+                high = low
             resolved_layer_band = (low, high)
     rauq = RAUQ(
         alpha=float(config.get("alpha", DEFAULT_CONFIG["alpha"])),

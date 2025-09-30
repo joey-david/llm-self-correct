@@ -15,6 +15,7 @@ CFG = {
         "openbookqa": True,
         "ai2_arc": True,
         "strategyqa": True,
+        "mmlu": True,
         "gsm8k": False,
         "popqa": False,
         "hotpotqa_distractor": False,
@@ -28,6 +29,7 @@ CFG = {
         "openbookqa": None,
         "ai2_arc": None,
         "strategyqa": None,
+        "mmlu": None,
         "gsm8k": None,
         "popqa": None,
         "hotpotqa_distractor": None,
@@ -35,6 +37,10 @@ CFG = {
     },
     # If you prefer a global target size, set an int here (None = no global cap)
     "total_target": 5000,
+    # When True and total_target is set, sample approximately equally per
+    # enabled dataset (instead of letting the largest dataset dominate).
+    # Any shortfall for a dataset is redistributed to others with supply.
+    "balance_by_dataset": True,
 }
 
 random.seed(CFG["seed"])
@@ -139,6 +145,69 @@ def load_strategyqa() -> List[dict]:
         out.append(make_record("strategyqa", ex.get("question",""), ans, "boolean", options=["yes","no"], split="train", source_id=i))
     return out
 
+def load_mmlu() -> List[dict]:
+    """Load the MMLU benchmark across subjects as multiple-choice QA."""
+    out: List[dict] = []
+    # Preferred configuration: combined dataset with explicit split
+    try:
+        ds = load_dataset("lukaemon/mmlu", "all", split="dev")
+    except Exception:
+        # Fallback to hendrycksTest subjects if the combined config is unavailable
+        subjects = [
+            "abstract_algebra",
+            "astronomy",
+            "college_biology",
+            "college_computer_science",
+            "college_physics",
+            "global_facts",
+            "high_school_chemistry",
+            "high_school_mathematics",
+            "high_school_physics",
+            "machine_learning",
+        ]
+        parts = []
+        for subj in subjects:
+            try:
+                part = load_dataset("hendrycksTest", subj, split="test")
+                parts.append(part)
+            except Exception:
+                continue
+        if not parts:
+            return out
+        ds = concatenate_datasets(parts)
+
+    for idx in range(len(ds)):
+        ex = ds[idx]
+        question = ex.get("question", "")
+        raw_choices = ex.get("choices") or ex.get("options") or []
+        options = [str(c) for c in raw_choices]
+        answer = ex.get("answer")
+        gold: List[str] = []
+        if isinstance(answer, str) and options:
+            first_char = answer.strip()[:1].upper()
+            if first_char and "A" <= first_char <= "Z":
+                pos = ord(first_char) - ord("A")
+                if 0 <= pos < len(options):
+                    gold.append(options[pos])
+        elif isinstance(answer, int) and 0 <= answer < len(options):
+            gold.append(options[int(answer)])
+        meta = {
+            "subject": ex.get("subject"),
+        }
+        out.append(
+            make_record(
+                "mmlu",
+                question,
+                gold,
+                "choice",
+                options=options,
+                split=str(ex.get("split", "")),
+                meta=meta,
+                source_id=idx,
+            )
+        )
+    return out
+
 def load_gsm8k() -> List[dict]:
     ds = load_dataset("gsm8k", "main", split="train")
     out = []
@@ -187,6 +256,7 @@ LOADERS = {
     "openbookqa": load_openbookqa,
     "ai2_arc": load_ai2_arc,
     "strategyqa": load_strategyqa,
+    "mmlu": load_mmlu,
     "gsm8k": load_gsm8k,
     "popqa": load_popqa,
     "hotpotqa_distractor": load_hotpotqa_distractor,
@@ -202,20 +272,69 @@ def main():
     ap = argparse.ArgumentParser(description="Build calibration JSONL with standardized schema.")
     ap.add_argument("--out", default=CFG["out"])
     ap.add_argument("--seed", type=int, default=CFG["seed"])
+    ap.add_argument(
+        "--datasets",
+        type=str,
+        help="Comma-separated dataset keys to include (defaults to CFG['enable']).",
+    )
     args = ap.parse_args()
 
     rng = random.Random(args.seed)
-    all_rec = []
-    for name, fn in LOADERS.items():
-        if not CFG["enable"].get(name, False): continue
-        recs = fn()
-        recs = cap_sample(recs, CFG["max_per_dataset"].get(name), args.seed)
-        all_rec.extend(recs)
-
-    if CFG["total_target"]:
-        rng.shuffle(all_rec)
-        all_rec = all_rec[:CFG["total_target"]]
+    if args.datasets:
+        include = {name.strip() for name in args.datasets.split(",") if name.strip()}
     else:
+        include = {name for name, enabled in CFG["enable"].items() if enabled}
+
+    # Load per‑dataset pools first so we can balance sampling later
+    pools = {}
+    for name, fn in LOADERS.items():
+        if name not in include:
+            continue
+        try:
+            recs = fn()
+        except Exception as exc:
+            print(f"[compile_calib] Skipping dataset '{name}' due to load error: {exc}")
+            continue
+        recs = cap_sample(recs, CFG["max_per_dataset"].get(name), args.seed)
+        if not recs:
+            print(f"[compile_calib] No records for dataset '{name}' after capping; skipping.")
+            continue
+        pools[name] = recs
+    # Assemble final list, optionally balancing by dataset
+    all_rec = []
+    if CFG["total_target"]:
+        target = int(CFG["total_target"]) or 0
+        names = [n for n in pools.keys()]
+        rng.shuffle(names)
+        if CFG.get("balance_by_dataset", False) and names:
+            # Start with equal quotas, then redistribute leftover capacity
+            quotas = {n: min(len(pools[n]), target // len(names)) for n in names}
+            assigned = sum(quotas.values())
+            # Remainder: round‑robin give to datasets with remaining supply
+            remaining = target - assigned
+            cycle = [n for n in names]
+            while remaining > 0 and cycle:
+                nxt = cycle.pop(0)
+                if quotas[nxt] < len(pools[nxt]):
+                    quotas[nxt] += 1
+                    remaining -= 1
+                    cycle.append(nxt)
+            # Sample according to quotas
+            for n in names:
+                lst = list(pools[n])
+                rng.shuffle(lst)
+                all_rec.extend(lst[:quotas.get(n, 0)])
+        else:
+            # Unbalanced: simply pool everything and take first N after shuffle
+            tmp = []
+            for n in pools:
+                tmp.extend(pools[n])
+            rng.shuffle(tmp)
+            all_rec = tmp[:target]
+    else:
+        # No total target: keep everything (still shuffle for downstream variety)
+        for n in pools:
+            all_rec.extend(pools[n])
         rng.shuffle(all_rec)
 
     out_path = args.out

@@ -138,27 +138,45 @@ class AnswerScorer:
         return m[-1] if m else None
 
     def score(self, record: Dict, pred_eval: str, raw_pred: Optional[str] = None) -> bool:
-        """Return True if predicted answer is accepted as correct."""
-        # Reset per-call details
+        """Return True if predicted answer is accepted as correct.
+
+        New rule: use a fused performance score defined as
+            score = max(alignscore_best, max_recall(pred, answer_i))
+        where recall is token recall of gold answer tokens contained in the
+        predicted string (after normalization). We then threshold this score by
+        `alignscore_threshold` to decide correctness.
+        """
+        # Reset per-call details (still expose AlignScore best if available)
         self.last_alignscore_score = None
+
+        # Source texts
         answers = [a.strip() for a in (record.get("answers") or []) if isinstance(a, str) and a.strip()]
-        candidate_text = "" if (raw_pred if raw_pred is not None else pred_eval) is None else str(raw_pred if raw_pred is not None else pred_eval)
+        candidate_text = (
+            "" if (raw_pred if raw_pred is not None else pred_eval) is None else str(raw_pred if raw_pred is not None else pred_eval)
+        )
 
-        # 1) Try AlignScore (if enabled & available)
-        align = self._alignscore_match(record, candidate_text)
-        if align is True:
-            return True
-        if align is False:
-            return False
-        # align is None => fall back to heuristics
+        # Compute AlignScore numeric value if possible (also updates last_alignscore_score)
+        align_val = self._alignscore_value(record, candidate_text)
+        if align_val is None:
+            align_val = 0.0
 
-        # 2) Heuristics (exact/subset/containment, case-insensitive)
+        # Compute lexical recall vs any provided reference answer
+        recall_val = self._max_recall(candidate_text, answers)
+
+        fused = max(float(align_val), float(recall_val))
+        # If we don't have any answers to compare (e.g., unanswerable examples),
+        # fall back to simple thresholding on AlignScore only.
         if not answers:
-            return False
+            return fused >= self.alignscore_threshold and (self.last_alignscore_score or 0.0) >= self.alignscore_threshold
+
+        # Decide correctness from fused score; retain previous heuristics as a
+        # last resort for edge cases where tokenization misses an obvious match.
+        if fused >= self.alignscore_threshold:
+            return True
         evaluated = (pred_eval or "").strip()
-        if not evaluated:
-            return False
-        return self._exact_or_subset_match(evaluated, answers)
+        if evaluated and self._exact_or_subset_match(evaluated, answers):
+            return True
+        return False
 
     # -------------------- Internals --------------------
 
@@ -221,6 +239,36 @@ class AnswerScorer:
         )
         return best >= self.alignscore_threshold
 
+    def _alignscore_value(self, record: Dict, pred_text: str) -> Optional[float]:
+        """Return the numeric AlignScore best score if available; None otherwise.
+        Also sets `last_alignscore_score` for downstream logging.
+        """
+        if self._disabled_reason:
+            return None
+        pred_text = (pred_text or "").strip()
+        if not pred_text:
+            return None
+        refs = [a.strip() for a in (record.get("answers") or []) if isinstance(a, str) and a.strip()]
+        if not refs:
+            return None
+        try:
+            scorer = self._ensure_alignscore()
+        except RuntimeError:
+            # Do not spam; mark as disabled for remainder of run
+            self._disabled_reason = "init failed"
+            return None
+        claims = [pred_text] * len(refs)
+        try:
+            raw = scorer.score(contexts=refs, claims=claims)
+        except TypeError:
+            raw = scorer.score(refs, claims)
+        scores = self._extract_align_scores(raw)
+        if not scores:
+            return None
+        best = float(max(scores))
+        self.last_alignscore_score = best
+        return best
+
     def _extract_align_scores(self, payload: object) -> List[float]:
         if payload is None:
             return []
@@ -246,6 +294,37 @@ class AnswerScorer:
                     pass
             return out
         return []
+
+    # -------------------- Lexical recall helpers --------------------
+
+    _TOKEN_RE = re.compile(r"[a-z0-9]+", re.IGNORECASE)
+
+    def _norm_tokens(self, s: str) -> List[str]:
+        if not s:
+            return []
+        return [t.lower() for t in self._TOKEN_RE.findall(s.lower()) if t]
+
+    def _recall(self, pred: str, gold: str) -> float:
+        """Token recall of gold given pred: |pred ∩ gold| / |gold|."""
+        g = self._norm_tokens(gold)
+        if not g:
+            return 0.0
+        pset = set(self._norm_tokens(pred))
+        gset = set(g)
+        if not gset:
+            return 0.0
+        return float(len(pset & gset)) / float(len(gset))
+
+    def _max_recall(self, pred: str, answers: Iterable[str]) -> float:
+        best = 0.0
+        for a in answers or []:
+            try:
+                r = self._recall(pred, a)
+                if r > best:
+                    best = r
+            except Exception:
+                continue
+        return best
 
     def _ensure_alignscore(self):
         if self._alignscore is not None:

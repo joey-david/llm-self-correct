@@ -685,6 +685,13 @@ def summarize_insights(records: List[Record], outdir: Path) -> Path:
     n_with_u = sum(1 for r in records if r.u_final is not None)
     labels = [r.correct for r in records if r.correct is not None]
     acc = accuracy([bool(x) for x in labels]) if labels else float("nan")
+    # Macro accuracy (dataset-balanced): average accuracy across datasets
+    by_ds_for_macro: Dict[str, List[bool]] = defaultdict(list)
+    for r in records:
+        if r.correct is None:
+            continue
+        by_ds_for_macro[r.dataset or "<unknown>"].append(bool(r.correct))
+    macro_acc = float(np.mean([accuracy(v) for v in by_ds_for_macro.values()])) if by_ds_for_macro else float("nan")
     n_align = sum(1 for r in records if r.alignscore_best is not None)
     # ROC/PR overall
     xs = np.array([float(r.u_final) for r in records if r.u_final is not None and r.correct is not None], dtype=float)
@@ -716,7 +723,14 @@ def summarize_insights(records: List[Record], outdir: Path) -> Path:
     # Heuristics to highlight weak points
     findings: List[str] = []
     findings.append(f"Records: {n} (with u_final: {n_with_u}, with AlignScore: {n_align})")
-    findings.append(f"Overall accuracy: {acc:.3f}" if np.isfinite(acc) else "Overall accuracy: n/a")
+    findings.append(
+        f"Overall accuracy (micro): {acc:.3f}" if np.isfinite(acc) else "Overall accuracy (micro): n/a"
+    )
+    findings.append(
+        f"Overall accuracy (macro, per‑dataset): {macro_acc:.3f}"
+        if np.isfinite(macro_acc)
+        else "Overall accuracy (macro): n/a"
+    )
     findings.append(
         f"RAUQ error-detection AUC: {auc_u:.3f}, AP: {ap_u:.3f}" if np.isfinite(auc_u) else "RAUQ AUC/AP: n/a"
     )
