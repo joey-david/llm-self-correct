@@ -1,33 +1,117 @@
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Dict, Iterable, List, Optional
 
 
 class HeadSelector:
     """Selects the most recurrent previous-token head per layer."""
 
-    def select_for_sequence(self, a_prev_all_heads: List[Dict[str, List[float]]]) -> Dict[str, int]:
-        if not a_prev_all_heads:
-            return {}
+    def __init__(self) -> None:
+        self._totals: Dict[str, List[float]] = {}
+        self._head_counts: Dict[str, int] = {}
+        self._selected: Optional[Dict[str, int]] = None
+        self._num_sequences: int = 0
 
-        layers = sorted(a_prev_all_heads[0].keys())
+    def reset(self) -> None:
+        self._totals.clear()
+        self._head_counts.clear()
+        self._selected = None
+        self._num_sequences = 0
+
+    def observe_sequence(self, a_prev_all_heads: List[Dict[str, List[float]]]) -> None:
+        """Accumulate per-head attention scores from a decoded sequence."""
+
+        if self._selected is not None or not a_prev_all_heads:
+            return
+
+        layer_names = set()
+        for token_heads in a_prev_all_heads:
+            layer_names.update(token_heads.keys())
+        layers = sorted(layer_names)
         num_tokens = len(a_prev_all_heads)
-        selected: Dict[str, int] = {}
+        if num_tokens <= 1:
+            for layer in layers:
+                self._head_counts[layer] = self._layer_head_count(layer, a_prev_all_heads)
+            self._num_sequences += 1
+            return
 
         for layer in layers:
-            head_counts = len(a_prev_all_heads[0].get(layer, []))
+            head_counts = self._layer_head_count(layer, a_prev_all_heads)
+            self._head_counts[layer] = max(self._head_counts.get(layer, 0), head_counts)
             if head_counts == 0:
-                selected[layer] = 0
                 continue
-            if num_tokens <= 1:
-                selected[layer] = 0
-                continue
-            totals = [0.0] * head_counts
+
+            totals = self._totals.setdefault(layer, [0.0] * head_counts)
+            if len(totals) < head_counts:
+                totals.extend([0.0] * (head_counts - len(totals)))
+
             for token_idx in range(1, num_tokens):
                 heads = a_prev_all_heads[token_idx].get(layer, [])
-                for h_idx, val in enumerate(heads):
-                    totals[h_idx] += float(val)
-            best_idx = max(range(head_counts), key=lambda idx: totals[idx])
-            selected[layer] = best_idx
+                upto = min(len(heads), head_counts)
+                for h_idx in range(upto):
+                    totals[h_idx] += float(heads[h_idx])
 
-        return selected
+        self._num_sequences += 1
+
+    def fit(self, sequences: Iterable[List[Dict[str, List[float]]]]) -> Dict[str, int]:
+        for seq in sequences:
+            self.observe_sequence(seq)
+        return self.finalize()
+
+    def finalize(self) -> Dict[str, int]:
+        if self._selected is not None:
+            return dict(self._selected)
+
+        selected: Dict[str, int] = {}
+        all_layers = set(self._head_counts.keys()) | set(self._totals.keys())
+        for layer in sorted(all_layers):
+            head_count = self._head_counts.get(layer, 0)
+            totals = self._totals.get(layer, [])
+            if head_count == 0:
+                selected[layer] = 0
+                continue
+
+            if len(totals) < head_count:
+                totals = totals + [0.0] * (head_count - len(totals))
+
+            if not any(totals):
+                selected[layer] = 0
+                continue
+
+            best_idx = max(range(len(totals)), key=totals.__getitem__)
+            selected[layer] = int(best_idx)
+
+        self._selected = selected
+        return dict(selected)
+
+    def is_ready(self) -> bool:
+        return self._selected is not None
+
+    def get_selected(self) -> Dict[str, int]:
+        if self._selected is None:
+            raise RuntimeError("HeadSelector has not been finalized. Run finalize() first.")
+        return dict(self._selected)
+
+    def select_for_sequence(self, a_prev_all_heads: List[Dict[str, List[float]]]) -> Dict[str, int]:
+        """Backward-compatible helper returning the frozen head selection."""
+
+        if self._selected is None:
+            raise RuntimeError(
+                "HeadSelector.select_for_sequence() is deprecated for per-sequence estimation. "
+                "Call observe_sequence()/finalize() during calibration and get_selected() afterwards."
+            )
+        return dict(self._selected)
+
+    @property
+    def num_sequences(self) -> int:
+        return self._num_sequences
+
+    @staticmethod
+    def _layer_head_count(
+        layer: str, a_prev_all_heads: List[Dict[str, List[float]]]
+    ) -> int:
+        for token_heads in a_prev_all_heads:
+            heads = token_heads.get(layer)
+            if heads is not None:
+                return len(heads)
+        return 0

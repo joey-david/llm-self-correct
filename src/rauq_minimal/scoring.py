@@ -18,12 +18,11 @@ except ImportError:  # pragma: no cover - alignscore isn't bundled by default
     _AlignScoreImpl = None
 
 
-_PUNCT_RE = re.compile(r"[\W_]+", re.UNICODE)
 _NUM_RE = re.compile(r"-?\d+(?:\.\d+)?")
 
 
 class AnswerScorer:
-    """Utility helpers for normalizing predictions and scoring."""
+    """Utility helpers for scoring predictions."""
 
     def __init__(
         self,
@@ -76,39 +75,34 @@ class AnswerScorer:
         self._alignscore = None
         self._alignscore_warned = False
 
-    def normalize(self, text: str) -> str:
-        if text is None:
-            return ""
-        text = text.strip().lower()
-        text = _PUNCT_RE.sub(" ", text)
-        return re.sub(r"\s+", " ", text).strip()
-
     def pick_choice(self, pred_text: str, options: Iterable[str]) -> str:
         options_list = list(options or [])
         if not options_list:
-            return pred_text.strip()
+            return (pred_text or "").strip()
 
-        pred_norm = self.normalize(pred_text)
-        # Try to detect leading letter selection (A/B/...)
-        first_token = pred_norm.split(" ", 1)[0] if pred_norm else ""
-        if first_token:
-            for idx, opt in enumerate(options_list):
-                label = chr(ord("a") + idx)
-                if first_token == label:
-                    return opt
+        pred_clean = (pred_text or "").strip()
+        if not pred_clean:
+            return options_list[0]
 
-        option_norms = [self.normalize(opt) for opt in options_list]
-        if pred_norm in option_norms:
-            return options_list[option_norms.index(pred_norm)]
+        first_token = pred_clean.split(None, 1)[0].lower()
+        for idx, opt in enumerate(options_list):
+            label = chr(ord("a") + idx)
+            if first_token == label:
+                return opt
 
-        pred_tokens = set(pred_norm.split())
+        for opt in options_list:
+            if pred_clean.lower() == (opt or "").strip().lower():
+                return opt
+
+        pred_tokens = {token.lower() for token in pred_clean.split()}
         best_idx = 0
         best_overlap = -1
-        for idx, opt_norm in enumerate(option_norms):
-            opt_tokens = set(opt_norm.split())
-            if not opt_tokens:
+        for idx, option in enumerate(options_list):
+            option_str = (option or "").strip()
+            option_tokens = {tok.lower() for tok in option_str.split() if tok}
+            if not option_tokens:
                 continue
-            overlap = len(pred_tokens & opt_tokens)
+            overlap = len(pred_tokens & option_tokens)
             if overlap > best_overlap:
                 best_overlap = overlap
                 best_idx = idx
@@ -123,40 +117,46 @@ class AnswerScorer:
         return matches[-1]
 
     def score(self, record: Dict, pred_eval: str, raw_pred: Optional[str] = None) -> bool:
-        answer_type = (record.get("answer_type") or "open").lower()
-        answers_norm = record.get("answers_normalized") or []
-        pred_norm = self.normalize(pred_eval)
+        answers = [
+            a.strip()
+            for a in (record.get("answers") or [])
+            if isinstance(a, str) and a.strip()
+        ]
+        candidate_obj = raw_pred if raw_pred is not None else pred_eval
+        candidate_text = "" if candidate_obj is None else str(candidate_obj)
 
-        if answer_type != "open":
-            if not answers_norm:
-                return False
-            if self._heuristic_match(answers_norm, pred_norm):
-                return True
-            candidate = raw_pred if raw_pred is not None else pred_eval
-            return self._alignscore_match(record, candidate)
+        alignscore_result = self._alignscore_match(record, candidate_text)
+        if alignscore_result is not None:
+            return alignscore_result
 
-        heuristic_match = self._heuristic_match(answers_norm, pred_norm) if answers_norm else False
-        if heuristic_match:
-            return True
-
-        candidate = raw_pred if raw_pred is not None else pred_eval
-        return self._alignscore_match(record, candidate)
-
-    def _heuristic_match(self, answers_norm: Iterable[str], pred_norm: str) -> bool:
-        if not answers_norm or not pred_norm:
-            return False
-        norm_answers = {re.sub(r"\s+", " ", _PUNCT_RE.sub(" ", a.lower())).strip() for a in answers_norm}
-        pred_norm_clean = re.sub(r"\s+", " ", _PUNCT_RE.sub(" ", pred_norm.lower())).strip()
-        return pred_norm_clean in norm_answers
-
-    def _alignscore_match(self, record: Dict, pred_text: str) -> bool:
-        if not self.alignscore_model:
-            return False
-        if not pred_text:
-            return False
-        answers = [a for a in (record.get("answers") or []) if isinstance(a, str) and a.strip()]
         if not answers:
             return False
+
+        evaluated = (pred_eval or "").strip()
+        if not evaluated:
+            return False
+
+        evaluated_lower = evaluated.lower()
+        for answer in answers:
+            if evaluated_lower == answer.lower():
+                return True
+        return False
+
+    def _alignscore_match(self, record: Dict, pred_text: str) -> Optional[bool]:
+        if not self.alignscore_model:
+            return None
+        if not isinstance(pred_text, str):
+            pred_text = str(pred_text)
+        pred_text = pred_text.strip()
+        if not pred_text:
+            return None
+        answers = [
+            a.strip()
+            for a in (record.get("answers") or [])
+            if isinstance(a, str) and a.strip()
+        ]
+        if not answers:
+            return None
 
         try:
             scorer = self._ensure_alignscore()
@@ -164,13 +164,13 @@ class AnswerScorer:
             if not self._alignscore_warned:
                 logging.warning("%s", exc)
                 self._alignscore_warned = True
-            return False
+            return None
 
         if not hasattr(scorer, "score"):
             if not self._alignscore_warned:
                 logging.warning("AlignScore implementation does not expose a 'score' method; skipping AlignScore check")
                 self._alignscore_warned = True
-            return False
+            return None
 
         contexts = answers
         claims = [pred_text] * len(answers)
@@ -182,7 +182,7 @@ class AnswerScorer:
 
         scores = self._extract_align_scores(raw_scores)
         if not scores:
-            return False
+            return None
         best = max(scores)
         return best >= self.alignscore_threshold
 

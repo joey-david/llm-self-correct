@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import math
 import random
-from typing import Dict, List, Optional, Set
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Set, TextIO, Tuple
 
 import numpy as np
 import torch
@@ -14,6 +15,13 @@ from .model import ModelAdapter
 from .prompt import PromptBuilder
 from .rauq import RAUQ
 from .scoring import AnswerScorer
+
+
+@dataclass
+class DecodeArtifacts:
+    pred_text: str
+    logp_token: List[float]
+    a_prev_all_heads: List[Dict[str, List[float]]]
 
 
 class Runner:
@@ -29,6 +37,7 @@ class Runner:
         max_new_tokens: int,
         store_all_heads: bool = False,
         dataset_fraction: float = 1.0,
+        head_calibration_samples: int = 32,
         debug_decode: bool = False,
     ) -> None:
         self.model_adapter = model_adapter
@@ -41,6 +50,9 @@ class Runner:
         if dataset_fraction < 0.0 or dataset_fraction > 1.0:
             raise ValueError("dataset_fraction must be between 0 and 1")
         self.dataset_fraction = dataset_fraction
+        if head_calibration_samples < 0:
+            raise ValueError("head_calibration_samples must be non-negative")
+        self.head_calibration_samples = int(head_calibration_samples)
         self.debug_decode = debug_decode
 
     def run(self, input_path: str, output_path: str) -> None:
@@ -55,6 +67,15 @@ class Runner:
         else:
             total_records = len(selected_indices)
 
+        calibration_active = self.max_new_tokens > 0 and self.head_calibration_samples > 0
+        calibration_buffer: List[Tuple[Dict, str, DecodeArtifacts]] = []
+        frozen_heads: Optional[Dict[str, int]] = (
+            self.head_selector.get_selected() if self.head_selector.is_ready() else None
+        )
+
+        if not calibration_active and frozen_heads is None:
+            frozen_heads = self.head_selector.finalize()
+
         with open(input_path, "r", encoding="utf-8") as fin, open(
             output_path, "w", encoding="utf-8"
         ) as fout, tqdm(total=total_records, desc="Labeling RAUQ", unit="record") as progress:
@@ -65,20 +86,53 @@ class Runner:
                 if not line:
                     continue
                 record = json.loads(line)
-                result = self.process_record(record)
+                prompt = self.prompt_builder.build(record)
+
+                if calibration_active and not self.head_selector.is_ready():
+                    decode = self._decode_prompt(prompt)
+                    self.head_selector.observe_sequence(decode.a_prev_all_heads)
+                    calibration_buffer.append((record, prompt, decode))
+                    if len(calibration_buffer) >= self.head_calibration_samples:
+                        frozen_heads = self.head_selector.finalize()
+                        self._emit_buffer(calibration_buffer, frozen_heads, fout, progress)
+                        calibration_buffer.clear()
+                    continue
+
+                if frozen_heads is None and self.head_selector.is_ready():
+                    frozen_heads = self.head_selector.get_selected()
+
+                result = self.process_record(
+                    record,
+                    prompt=prompt,
+                    selected_heads=frozen_heads,
+                )
                 fout.write(json.dumps(result) + "\n")
                 fout.flush()
                 progress.update(1)
 
-    def process_record(self, record: Dict) -> Dict:
-        prompt = self.prompt_builder.build(record)
+            if calibration_buffer:
+                if not self.head_selector.is_ready():
+                    frozen_heads = self.head_selector.finalize()
+                elif frozen_heads is None:
+                    frozen_heads = self.head_selector.get_selected()
+                self._emit_buffer(calibration_buffer, frozen_heads, fout, progress)
+
+    def process_record(
+        self,
+        record: Dict,
+        prompt: Optional[str] = None,
+        decode_artifacts: Optional[DecodeArtifacts] = None,
+        selected_heads: Optional[Dict[str, int]] = None,
+    ) -> Dict:
+        prompt_str = prompt if prompt is not None else self.prompt_builder.build(record)
+
         if self.max_new_tokens <= 0:
             pred_text = ""
             pred_eval = self._make_pred_eval(record, pred_text)
             return {
                 "id": record.get("id"),
                 "dataset": record.get("dataset"),
-                "prompt": prompt,
+                "prompt": prompt_str,
                 "pred_text": pred_text,
                 "answers": record.get("answers") or [],
                 "correct": self.scorer.score(record, pred_eval, raw_pred=pred_text),
@@ -89,12 +143,44 @@ class Runner:
                 "u_final": 0.0,
             }
 
+        artifacts = decode_artifacts or self._decode_prompt(prompt_str)
+        pred_text = artifacts.pred_text
+        assert "<think>" not in pred_text, "Model emitted hidden thinking tokens despite disable."
+
+        pred_eval = self._make_pred_eval(record, pred_text)
+        correct = self.scorer.score(record, pred_eval, raw_pred=pred_text)
+
+        heads = selected_heads if selected_heads is not None else self.head_selector.get_selected()
+        heads_dict = dict(heads)
+        u_final, u_token, best_layer, best_head = self.rauq.compute(
+            artifacts.logp_token,
+            artifacts.a_prev_all_heads,
+            heads_dict,
+        )
+
+        result = {
+            "id": record.get("id"),
+            "dataset": record.get("dataset"),
+            "prompt": prompt_str,
+            "pred_text": pred_text,
+            "answers": record.get("answers") or [],
+            "correct": correct,
+            "alpha": self.rauq.alpha,
+            "selected_layer": best_layer,
+            "selected_head": best_head,
+            "u_token": u_token,
+            "u_final": u_final,
+        }
+
+        if self.store_all_heads:
+            result["a_prev_all_heads"] = artifacts.a_prev_all_heads
+            result["selected_heads"] = heads_dict
+
+        return result
+
+    def _decode_prompt(self, prompt: str) -> DecodeArtifacts:
         prompt_ids = self.model_adapter.encode(prompt)
         prompt_mask = torch.ones_like(prompt_ids, dtype=torch.long, device=self.model_adapter.device)
-        # print(
-        #     f"[Runner] enable_thinking status: {self.model_adapter.enable_thinking_status} "
-        #     f"(supports={self.model_adapter.chat_template_supports_enable_thinking})"
-        # )
 
         gen_token_ids: List[int] = []
         logp_token: List[float] = []
@@ -154,34 +240,30 @@ class Runner:
             a_prev_all_heads[0] = zero_dict
 
         pred_text = self.model_adapter.tokenizer.decode(gen_token_ids, skip_special_tokens=True)
-        assert "<think>" not in pred_text, "Model emitted hidden thinking tokens despite disable."
-        pred_eval = self._make_pred_eval(record, pred_text)
-        correct = self.scorer.score(record, pred_eval, raw_pred=pred_text)
 
-        selected_heads = self.head_selector.select_for_sequence(a_prev_all_heads)
-        u_final, u_token, best_layer, best_head = self.rauq.compute(
-            logp_token, a_prev_all_heads, selected_heads
+        return DecodeArtifacts(
+            pred_text=pred_text,
+            logp_token=logp_token,
+            a_prev_all_heads=a_prev_all_heads,
         )
 
-        result = {
-            "id": record.get("id"),
-            "dataset": record.get("dataset"),
-            "prompt": prompt,
-            "pred_text": pred_text,
-            "answers": record.get("answers") or [],
-            "correct": correct,
-            "alpha": self.rauq.alpha,
-            "selected_layer": best_layer,
-            "selected_head": best_head,
-            "u_token": u_token,
-            "u_final": u_final,
-        }
-
-        if self.store_all_heads:
-            result["a_prev_all_heads"] = a_prev_all_heads
-            result["selected_heads"] = selected_heads
-
-        return result
+    def _emit_buffer(
+        self,
+        buffer: List[Tuple[Dict, str, DecodeArtifacts]],
+        selected_heads: Dict[str, int],
+        fout: TextIO,
+        progress,
+    ) -> None:
+        for record, prompt, decode in buffer:
+            result = self.process_record(
+                record,
+                prompt=prompt,
+                decode_artifacts=decode,
+                selected_heads=selected_heads,
+            )
+            fout.write(json.dumps(result) + "\n")
+            fout.flush()
+            progress.update(1)
 
     def _should_stop(self, token_id: int) -> bool:
         eos_ids = self.model_adapter.eos_token_ids
@@ -220,15 +302,16 @@ class Runner:
 
         if answer_type == "choice":
             picked = self.scorer.pick_choice(pred_text, options)
-            return self.scorer.normalize(picked)
+            return (picked or "").strip()
 
         if answer_type == "boolean":
-            norm = self.scorer.normalize(pred_text)
-            if norm.startswith("yes"):
+            cleaned = (pred_text or "").strip()
+            lowered = cleaned.lower()
+            if lowered.startswith("yes"):
                 return "yes"
-            if norm.startswith("no"):
+            if lowered.startswith("no"):
                 return "no"
-            return norm.split(" ", 1)[0] if norm else ""
+            return lowered.split(" ", 1)[0] if lowered else ""
 
         if answer_type == "numeric":
             numeric = self.scorer.extract_numeric(pred_text)
@@ -237,9 +320,9 @@ class Runner:
                 if numeric.endswith(".0"):
                     numeric = numeric[:-2]
                 return numeric
-            return self.scorer.normalize(pred_text)
+            return (pred_text or "").strip()
 
-        return self.scorer.normalize(pred_text)
+        return (pred_text or "").strip()
 
     def _zero_attention_template(self) -> Dict[str, List[float]]:
         num_layers = int(getattr(self.model_adapter.config, "num_hidden_layers", 0) or 0)

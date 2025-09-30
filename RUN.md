@@ -4,7 +4,7 @@ This CLI drives a causal LM token-by-token, logging log-probs/prev-token attenti
 To run it, either use a YAML config describing the dataset and model settings or use the default one. Example:
 
 ```yaml
-in: data/calibration/calibration_10k.jsonl
+in: data/calibration/calibration_ds.jsonl
 out: data/runs/calibration_rauq.jsonl
 model: Qwen/Qwen3-8B
 alpha: 0.2
