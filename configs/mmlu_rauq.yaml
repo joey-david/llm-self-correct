@@ -4,7 +4,7 @@ model: Qwen/Qwen3-8B
 alpha: 0.2
 max_new: 256
 device: auto
-head_calibration_samples: 512
+head_calibration_samples: 128
 dataset_fraction: 1.0
 store_all_heads: false
 layer_band: auto
