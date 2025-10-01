@@ -1,25 +1,3 @@
-#!/usr/bin/env python3
-"""
-RAUQ Metrics Dashboard (matplotlib)
-
-Reads a JSONL file of RAUQ outputs (default: data/artifacts/rauq_output.jsonl)
-and saves an extensive suite of plots to help diagnose weak points:
-
-- Summary: overall accuracy, counts (printed) and per-dataset accuracy (bar).
-- Uncertainty vs correctness: histograms, boxplots, calibration-by-bins.
-- ROC/PR for error detection using u_final; AUC/AvgPrecision.
-- AlignScore interplay (if available): scatter vs u_final, ROC/PR overlay.
-- Token-level RAUQ dynamics: mean u_token over position (overall and split),
-  spike position histograms.
-- Layer/head selection diagnostics: selected_layer and selected_head distributions.
-- Dataset-level separability: AUC by dataset.
-- Threshold sweeps: error recall/precision vs fraction flagged (gating view).
-
-Outputs PNGs under an output directory (default: data/plots) and a concise
-insights text file summarizing identified weak points.
-
-This script avoids heavy deps (no pandas/sklearn). Uses numpy + matplotlib.
-"""
 from __future__ import annotations
 
 import argparse
@@ -40,8 +18,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
-# ----------------------------- Data structures -----------------------------
-
 
 @dataclass
 class Record:
@@ -59,9 +35,6 @@ class Record:
     u_final: Optional[float]
     # Optional extras (if present when store_all_heads=True)
     selected_heads: Optional[Dict[str, int]] = None
-
-
-# ----------------------------- JSONL loading -------------------------------
 
 
 def load_jsonl(path: Path) -> List[Record]:
@@ -113,6 +86,43 @@ def _is_finite(x: Any) -> bool:
         return math.isfinite(float(x))
     except Exception:
         return False
+
+
+def _max_finite(seq: Sequence[float]) -> Optional[float]:
+    best: Optional[float] = None
+    for v in seq:
+        try:
+            vf = float(v)
+        except Exception:
+            continue
+        if not math.isfinite(vf):
+            continue
+        if best is None or vf > best:
+            best = vf
+    return best
+
+
+def _collect_scores(
+    records: Iterable[Record],
+    value_fn,
+) -> Tuple[np.ndarray, np.ndarray]:
+    xs: List[float] = []
+    ys: List[int] = []
+    for r in records:
+        if r.correct is None:
+            continue
+        val = value_fn(r)
+        if val is None:
+            continue
+        try:
+            fv = float(val)
+        except Exception:
+            continue
+        if not math.isfinite(fv):
+            continue
+        xs.append(fv)
+        ys.append(1 if not r.correct else 0)
+    return np.array(xs, dtype=float), np.array(ys, dtype=int)
 
 
 # ------------------------------- Metrics utils -----------------------------
@@ -291,72 +301,121 @@ def plot_u_hist_by_correct(records: List[Record], outdir: Path) -> Optional[Path
     return outpath
 
 
-def plot_u_vs_alignscore(records: List[Record], outdir: Path) -> Optional[Path]:
-    xs = []
-    ys = []
-    colors = []
+def plot_max_u_hist_by_correct(records: List[Record], outdir: Path) -> Optional[Path]:
+    vals_ok: List[float] = []
+    vals_bad: List[float] = []
     for r in records:
-        if r.u_final is None or r.alignscore_best is None:
+        if not r.u_token:
             continue
-        x = float(r.alignscore_best)
-        y = float(r.u_final)
-        if not (math.isfinite(x) and math.isfinite(y)):
+        max_u = _max_finite(r.u_token)
+        if max_u is None:
             continue
-        xs.append(x)
-        ys.append(y)
-        colors.append("#2ca02c" if r.correct else "#d62728")
+        if r.correct is False:
+            vals_bad.append(max_u)
+        elif r.correct is True:
+            vals_ok.append(max_u)
+    if not vals_ok and not vals_bad:
+        return None
+    plt.figure(figsize=(7, 5), dpi=150)
+    bins = 40
+    hist_range = (0.0, 3.5)
+    if vals_ok:
+        plt.hist(
+            vals_ok,
+            bins=bins,
+            range=hist_range,
+            alpha=0.6,
+            density=True,
+            label="correct",
+            color="#2ca02c",
+        )
+    if vals_bad:
+        plt.hist(
+            vals_bad,
+            bins=bins,
+            range=hist_range,
+            alpha=0.6,
+            density=True,
+            label="incorrect",
+            color="#d62728",
+        )
+    plt.xlim(hist_range)
+    plt.xlabel("max u_token")
+    plt.ylabel("Density")
+    plt.title("Max token uncertainty by correctness")
+    plt.legend()
+    plt.tight_layout()
+    outpath = outdir / "max_u_token_hist_by_correct.png"
+    plt.savefig(outpath)
+    plt.close()
+    return outpath
+
+
+def plot_u_final_vs_max(records: List[Record], outdir: Path) -> Optional[Path]:
+    xs: List[float] = []
+    ys: List[float] = []
+    colors: List[str] = []
+    for r in records:
+        if r.u_final is None or not r.u_token:
+            continue
+        max_u = _max_finite(r.u_token)
+        if max_u is None:
+            continue
+        uf = float(r.u_final)
+        if not math.isfinite(uf):
+            continue
+        xs.append(max_u)
+        ys.append(uf)
+        colors.append("#d62728" if r.correct is False else "#2ca02c")
     if not xs:
         return None
-    x_arr, y_arr = np.array(xs, dtype=float), np.array(ys, dtype=float)
-    corr = pearsonr_safe(x_arr, y_arr)
+    xv = np.array(xs, dtype=float)
+    yv = np.array(ys, dtype=float)
+    corr = pearsonr_safe(xv, yv)
 
     plt.figure(figsize=(7, 5), dpi=150)
-    plt.scatter(x_arr, y_arr, s=14, alpha=0.6, c=colors, edgecolors="none")
-    plt.xlabel("alignscore_best (higher => more aligned)")
-    plt.ylabel("u_final (higher => more uncertain)")
-    plt.title(f"u_final vs AlignScore (Pearson r={corr:.3f})")
+    plt.scatter(xv, yv, s=16, c=colors, alpha=0.6, edgecolors="none")
+    lim = max(float(np.nanmax(xv)), float(np.nanmax(yv))) if xv.size and yv.size else None
+    if lim is not None and math.isfinite(lim):
+        plt.plot([0, lim], [0, lim], linestyle="--", color="#888888", label="y=x")
+    plt.xlabel("max u_token")
+    plt.ylabel("u_final")
+    plt.title(f"u_final vs max token uncertainty (Pearson r={corr:.3f})")
     plt.grid(True, linestyle="--", alpha=0.3)
+    plt.legend()
     plt.tight_layout()
-    outpath = outdir / "u_final_vs_alignscore_scatter.png"
+    outpath = outdir / "u_final_vs_max_token.png"
     plt.savefig(outpath)
     plt.close()
     return outpath
 
 
 def plot_roc_pr(records: List[Record], outdir: Path) -> Tuple[Optional[Path], Optional[Path]]:
-    # RAUQ-based
-    u = np.array([float(r.u_final) for r in records if r.u_final is not None and r.correct is not None], dtype=float)
-    y = np.array([1 if not r.correct else 0 for r in records if r.u_final is not None and r.correct is not None], dtype=int)
-    if u.size >= 2 and np.unique(y).size >= 2:
-        (fpr_u, tpr_u, auc_u), (rec_u, prec_u, ap_u) = roc_pr_from_scores(y, u)
+    # RAUQ (u_final)
+    u_scores, y = _collect_scores(records, lambda r: r.u_final)
+    have_u = u_scores.size >= 2 and np.unique(y).size >= 2
+    if have_u:
+        (fpr_u, tpr_u, auc_u), (rec_u, prec_u, ap_u) = roc_pr_from_scores(y, u_scores)
     else:
         fpr_u = tpr_u = rec_u = prec_u = np.array([])
         auc_u = ap_u = float("nan")
 
-    # AlignScore-based (if present); invert so that higher score => more incorrect
-    a = np.array(
-        [float(r.alignscore_best) for r in records if r.alignscore_best is not None and r.correct is not None],
-        dtype=float,
-    )
-    y_a = np.array(
-        [1 if not r.correct else 0 for r in records if r.alignscore_best is not None and r.correct is not None],
-        dtype=int,
-    )
-    have_align = a.size >= 2 and np.unique(y_a).size >= 2
-    if have_align:
-        a_inv = 1.0 - (a - np.min(a)) / (np.ptp(a) if np.ptp(a) > 0 else 1.0)
-        (fpr_a, tpr_a, auc_a), (rec_a, prec_a, ap_a) = roc_pr_from_scores(y_a, a_inv)
+    # Max token uncertainty
+    max_scores, y_max = _collect_scores(records, lambda r: _max_finite(r.u_token or []))
+    have_max = max_scores.size >= 2 and np.unique(y_max).size >= 2
+    if have_max:
+        (fpr_max, tpr_max, auc_max), (rec_max, prec_max, ap_max) = roc_pr_from_scores(y_max, max_scores)
     else:
-        fpr_a = tpr_a = rec_a = prec_a = np.array([])
-        auc_a = ap_a = float("nan")
+        fpr_max = tpr_max = rec_max = prec_max = np.array([])
+        auc_max = ap_max = float("nan")
 
     roc_path = pr_path = None
-    # ROC
-    if fpr_u.size:
+    if fpr_u.size or fpr_max.size:
         plt.figure(figsize=(6, 6), dpi=150)
-        plt.plot(fpr_u, tpr_u, label=f"RAUQ (AUC={auc_u:.3f})", color="#1f77b4")
-        if have_align:
-            plt.plot(fpr_a, tpr_a, label=f"AlignScore (AUC={auc_a:.3f})", color="#ff7f0e")
+        if fpr_u.size:
+            plt.plot(fpr_u, tpr_u, label=f"u_final (AUC={auc_u:.3f})", color="#1f77b4")
+        if fpr_max.size:
+            plt.plot(fpr_max, tpr_max, label=f"max u_token (AUC={auc_max:.3f})", color="#ff7f0e")
         plt.plot([0, 1], [0, 1], linestyle="--", color="#888888", label="random")
         plt.xlabel("False Positive Rate")
         plt.ylabel("True Positive Rate")
@@ -367,12 +426,12 @@ def plot_roc_pr(records: List[Record], outdir: Path) -> Tuple[Optional[Path], Op
         plt.savefig(roc_path)
         plt.close()
 
-    # PR
-    if rec_u.size:
+    if rec_u.size or rec_max.size:
         plt.figure(figsize=(6, 6), dpi=150)
-        plt.plot(rec_u, prec_u, label=f"RAUQ (AP={ap_u:.3f})", color="#1f77b4")
-        if have_align:
-            plt.plot(rec_a, prec_a, label=f"AlignScore (AP={ap_a:.3f})", color="#ff7f0e")
+        if rec_u.size:
+            plt.plot(rec_u, prec_u, label=f"u_final (AP={ap_u:.3f})", color="#1f77b4")
+        if rec_max.size:
+            plt.plot(rec_max, prec_max, label=f"max u_token (AP={ap_max:.3f})", color="#ff7f0e")
         plt.xlabel("Recall (incorrect)")
         plt.ylabel("Precision (incorrect)")
         plt.title("PR: detect incorrect answers")
@@ -407,23 +466,59 @@ def plot_binned_failure_rate(records: List[Record], outdir: Path) -> Optional[Pa
     return outpath
 
 
-def plot_alignscore_calibration(records: List[Record], outdir: Path) -> Optional[Path]:
-    xs = np.array([float(r.alignscore_best) for r in records if r.alignscore_best is not None and r.correct is not None], dtype=float)
-    ys = np.array([1.0 if r.correct else 0.0 for r in records if r.alignscore_best is not None and r.correct is not None], dtype=float)
-    if xs.size == 0:
+def plot_dataset_uncertainty_gap(records: List[Record], outdir: Path) -> Optional[Path]:
+    per_ds_correct: Dict[str, List[float]] = defaultdict(list)
+    per_ds_incorrect: Dict[str, List[float]] = defaultdict(list)
+    for r in records:
+        if r.u_final is None or r.correct is None:
+            continue
+        try:
+            val = float(r.u_final)
+        except Exception:
+            continue
+        if not math.isfinite(val):
+            continue
+        key = r.dataset or "<unknown>"
+        if r.correct:
+            per_ds_correct[key].append(val)
+        else:
+            per_ds_incorrect[key].append(val)
+
+    gaps: List[Tuple[str, float, float, float]] = []
+    for ds in sorted(set(per_ds_correct) | set(per_ds_incorrect)):
+        good = per_ds_correct.get(ds, [])
+        bad = per_ds_incorrect.get(ds, [])
+        if not bad or not good:
+            continue
+        mean_bad = float(np.mean(bad))
+        mean_good = float(np.mean(good))
+        gap = mean_bad - mean_good
+        gaps.append((ds, gap, mean_bad, mean_good))
+
+    if not gaps:
         return None
-    centers, means, counts = binned_curve(xs, ys, bins=12)
-    if centers.size == 0:
-        return None
-    plt.figure(figsize=(7, 5), dpi=150)
-    plt.plot(centers, means, marker="o", color="#1f77b4", label="P(correct) by AlignScore bin")
-    plt.xlabel("alignscore_best (binned)")
-    plt.ylabel("Fraction correct")
-    plt.title("Observed correctness vs AlignScore bins")
-    plt.grid(True, linestyle="--", alpha=0.3)
-    plt.legend()
+
+    gaps.sort(key=lambda tup: tup[1], reverse=True)
+    labels = [g[0] for g in gaps]
+    values = [g[1] for g in gaps]
+
+    plt.figure(figsize=(min(12, 0.6 * len(labels) + 4), 5), dpi=150)
+    bars = plt.bar(range(len(labels)), values, color="#1f77b4", alpha=0.8)
+    plt.xticks(range(len(labels)), labels, rotation=45, ha="right")
+    plt.ylabel("Mean u_final(incorrect) - Mean u_final(correct)")
+    plt.title("Per-dataset uncertainty gap (higher better)")
+    for rect, (_, gap, mean_bad, mean_good) in zip(bars, gaps):
+        h = rect.get_height()
+        plt.text(
+            rect.get_x() + rect.get_width() / 2,
+            h + 0.01,
+            f"{gap:.2f}\n({mean_bad:.2f}/{mean_good:.2f})",
+            ha="center",
+            va="bottom",
+            fontsize=7,
+        )
     plt.tight_layout()
-    outpath = outdir / "correct_rate_vs_alignscore_binned.png"
+    outpath = outdir / "dataset_uncertainty_gap.png"
     plt.savefig(outpath)
     plt.close()
     return outpath
@@ -547,6 +642,53 @@ def plot_spike_positions(records: List[Record], outdir: Path) -> Optional[Path]:
     plt.legend()
     plt.tight_layout()
     outpath = outdir / "u_token_spike_position_hist.png"
+    plt.savefig(outpath)
+    plt.close()
+    return outpath
+
+
+def plot_length_uncertainty(records: List[Record], outdir: Path) -> Optional[Path]:
+    lengths: List[int] = []
+    u_vals: List[float] = []
+    fail_vals: List[float] = []
+    for r in records:
+        if r.u_final is None or r.correct is None:
+            continue
+        if not r.u_token:
+            continue
+        try:
+            u_val = float(r.u_final)
+        except Exception:
+            continue
+        if not math.isfinite(u_val):
+            continue
+        lengths.append(len(r.u_token))
+        u_vals.append(u_val)
+        fail_vals.append(1.0 if not r.correct else 0.0)
+
+    if not lengths:
+        return None
+
+    len_arr = np.array(lengths, dtype=float)
+    u_arr = np.array(u_vals, dtype=float)
+    fail_arr = np.array(fail_vals, dtype=float)
+
+    centers_u, mean_u, _ = binned_curve(len_arr, u_arr, bins=10)
+    centers_fail, mean_fail, _ = binned_curve(len_arr, fail_arr, bins=10)
+    if centers_u.size == 0:
+        return None
+
+    plt.figure(figsize=(8, 5), dpi=150)
+    plt.plot(centers_u, mean_u, marker="o", color="#1f77b4", label="Mean u_final")
+    if centers_fail.size:
+        plt.plot(centers_fail, mean_fail, marker="s", color="#d62728", label="Error rate")
+    plt.xlabel("Answer length (tokens with u_token)")
+    plt.ylabel("Value")
+    plt.title("Uncertainty and failure rate vs answer length")
+    plt.grid(True, linestyle="--", alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    outpath = outdir / "length_vs_uncertainty.png"
     plt.savefig(outpath)
     plt.close()
     return outpath
@@ -692,8 +834,7 @@ def summarize_insights(records: List[Record], outdir: Path) -> Path:
             continue
         by_ds_for_macro[r.dataset or "<unknown>"].append(bool(r.correct))
     macro_acc = float(np.mean([accuracy(v) for v in by_ds_for_macro.values()])) if by_ds_for_macro else float("nan")
-    n_align = sum(1 for r in records if r.alignscore_best is not None)
-    # ROC/PR overall
+    # ROC/PR overall for u_final
     xs = np.array([float(r.u_final) for r in records if r.u_final is not None and r.correct is not None], dtype=float)
     ys = np.array([1 if not r.correct else 0 for r in records if r.u_final is not None and r.correct is not None], dtype=int)
     if xs.size >= 2 and np.unique(ys).size >= 2:
@@ -715,14 +856,33 @@ def summarize_insights(records: List[Record], outdir: Path) -> Path:
                 auc_by_ds.append((name, float(auc)))
     auc_by_ds.sort(key=lambda kv: kv[1])
 
-    # Correlation with AlignScore
-    vals_u = [float(r.u_final) for r in records if r.u_final is not None and r.alignscore_best is not None]
-    vals_a = [float(r.alignscore_best) for r in records if r.u_final is not None and r.alignscore_best is not None]
-    corr = pearsonr_safe(np.array(vals_a, dtype=float), np.array(vals_u, dtype=float)) if vals_u else float("nan")
+    # u_final vs max-token gaps
+    gaps: List[float] = []
+    ratios: List[float] = []
+    for r in records:
+        if r.u_final is None or not r.u_token:
+            continue
+        max_u = _max_finite(r.u_token)
+        if max_u is None:
+            continue
+        try:
+            uf = float(r.u_final)
+        except Exception:
+            continue
+        if not math.isfinite(uf):
+            continue
+        gaps.append(max_u - uf)
+        if uf > 1e-8:
+            ratios.append(max_u / uf)
+
+    avg_gap = float(np.mean(gaps)) if gaps else float("nan")
+    p90_gap = float(np.quantile(gaps, 0.9)) if gaps else float("nan")
+    avg_ratio = float(np.mean(ratios)) if ratios else float("nan")
+    p90_ratio = float(np.quantile(ratios, 0.9)) if ratios else float("nan")
 
     # Heuristics to highlight weak points
     findings: List[str] = []
-    findings.append(f"Records: {n} (with u_final: {n_with_u}, with AlignScore: {n_align})")
+    findings.append(f"Records: {n} (with u_final: {n_with_u})")
     findings.append(
         f"Overall accuracy (micro): {acc:.3f}" if np.isfinite(acc) else "Overall accuracy (micro): n/a"
     )
@@ -734,8 +894,6 @@ def summarize_insights(records: List[Record], outdir: Path) -> Path:
     findings.append(
         f"RAUQ error-detection AUC: {auc_u:.3f}, AP: {ap_u:.3f}" if np.isfinite(auc_u) else "RAUQ AUC/AP: n/a"
     )
-    if np.isfinite(corr):
-        findings.append(f"Pearson(u_final, AlignScore): {corr:.3f} (expect negative)")
     if auc_by_ds:
         worst = auc_by_ds[0]
         best = auc_by_ds[-1]
@@ -744,6 +902,11 @@ def summarize_insights(records: List[Record], outdir: Path) -> Path:
         low = [f"{k}={v:.2f}" for k, v in auc_by_ds if v < 0.65]
         if low:
             findings.append("Datasets with weak separation (AUC<0.65): " + ", ".join(low))
+
+    if np.isfinite(avg_gap):
+        findings.append(f"Mean max-vs-final gap: {avg_gap:.3f} (p90={p90_gap:.3f})")
+    if np.isfinite(avg_ratio):
+        findings.append(f"Mean max/final ratio: {avg_ratio:.2f} (p90={p90_ratio:.2f})")
 
     # Token dynamics quick checks
     token_lens = [len(r.u_token) for r in records if r.u_token]
@@ -808,21 +971,22 @@ def main() -> None:
     n_total = len(records)
     n_correct = sum(1 for r in records if r.correct)
     n_labeled = sum(1 for r in records if r.correct is not None)
-    n_align = sum(1 for r in records if r.alignscore_best is not None)
+    n_with_u = sum(1 for r in records if r.u_final is not None)
     print(
-        f"Loaded {n_total} records (labeled: {n_labeled}, alignscore: {n_align}). Saving plots to {outdir}"
+        f"Loaded {n_total} records (labeled: {n_labeled}, with u_final: {n_with_u}). Saving plots to {outdir}"
     )
 
     # Plots
     produced: List[Tuple[str, Optional[Path]]] = []
     produced.append(("acc_by_dataset", plot_acc_by_dataset(records, outdir)))
     produced.append(("u_hist", plot_u_hist_by_correct(records, outdir)))
-    produced.append(("u_vs_align", plot_u_vs_alignscore(records, outdir)))
+    produced.append(("max_u_hist", plot_max_u_hist_by_correct(records, outdir)))
+    produced.append(("u_vs_max", plot_u_final_vs_max(records, outdir)))
     rpath, ppath = plot_roc_pr(records, outdir)
     produced.append(("roc", rpath))
     produced.append(("pr", ppath))
     produced.append(("binned_u_fail", plot_binned_failure_rate(records, outdir)))
-    produced.append(("binned_align_correct", plot_alignscore_calibration(records, outdir)))
+    produced.append(("dataset_uncert_gap", plot_dataset_uncertainty_gap(records, outdir)))
     ovr, split = plot_token_dynamics(records, outdir, max_len=int(args.max_tokens_plot))
     produced.append(("tok_dyn_overall", ovr))
     produced.append(("tok_dyn_split", split))
@@ -832,6 +996,7 @@ def main() -> None:
     produced.append(("head_hist", hpath))
     produced.append(("auc_by_dataset", plot_dataset_auc(records, outdir)))
     produced.append(("gating_tradeoff", plot_gating_tradeoff(records, outdir)))
+    produced.append(("length_uncertainty", plot_length_uncertainty(records, outdir)))
 
     # Insights
     insights_path = summarize_insights(records, outdir)

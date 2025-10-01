@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import difflib
 import logging
 import re
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Tuple
 import spacy
 
 
@@ -17,6 +18,9 @@ except Exception:
         _AlignScoreImpl = None
 
 _NUM_RE = re.compile(r"-?\d+(?:\.\d+)?")
+
+_ALNUM_SPACE_RE = re.compile(r"[^a-z0-9 ]+")
+_WS_RE = re.compile(r"\s+")
 
 # Embedded defaults for AlignScore usage (no .env or shell needed)
 _DEFAULT_MODEL = "roberta-base"  # default to smaller model by request
@@ -131,6 +135,79 @@ class AnswerScorer:
                 best_idx, best_overlap = idx, overlap
         return options_list[best_idx]
 
+    def resolve_mmlu_choice(self, record: Dict, pred_text: Optional[str]) -> Optional[str]:
+        """Return the best-matching option text for MMLU-style prompts."""
+        prompt = str(record.get("prompt") or "")
+        options = self._extract_mmlu_options(record, prompt)
+        if not options:
+            return None
+
+        normalized_pred = self._normalize_choice_text(pred_text)
+        if not normalized_pred:
+            return None
+
+        # Direct letter selection (single character a/b/..)
+        if len(normalized_pred) == 1:
+            target_letter = normalized_pred
+            for letter, text, _ in options:
+                if letter == target_letter:
+                    return text
+            return None
+
+        best_text: Optional[str] = None
+        best_score = -1.0
+        for letter, text, normalized_option in options:
+            if not normalized_option:
+                continue
+            score = difflib.SequenceMatcher(None, normalized_pred, normalized_option).ratio()
+            if score > best_score:
+                best_score = score
+                best_text = text
+
+        if best_text is not None:
+            return best_text
+
+        # Fallback: if we failed to compute similarity (e.g., all options empty),
+        # return the first option to keep behaviour deterministic.
+        return options[0][1]
+
+    def _extract_mmlu_options(self, record: Dict, prompt: str) -> List[Tuple[str, str, str]]:
+        """Parse lettered options from the prompt; fallback to record options."""
+        options: List[Tuple[str, str, str]] = []
+        for line in prompt.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            match = re.match(r"^([A-Za-z])\)\s*(.+)$", stripped)
+            if match:
+                letter = match.group(1).lower()
+                text = match.group(2).strip()
+                normalized = self._normalize_choice_text(text)
+                options.append((letter, text, normalized))
+
+        if options:
+            return options
+
+        fallback_options = record.get("options") or []
+        for idx, raw in enumerate(fallback_options):
+            if not isinstance(raw, str):
+                continue
+            text = raw.strip()
+            if not text:
+                continue
+            letter = chr(ord("a") + idx)
+            options.append((letter, text, self._normalize_choice_text(text)))
+
+        return options
+
+    def _normalize_choice_text(self, text: Optional[str]) -> str:
+        if text is None:
+            return ""
+        lowered = text.lower()
+        cleaned = _ALNUM_SPACE_RE.sub(" ", lowered)
+        collapsed = _WS_RE.sub(" ", cleaned).strip()
+        return collapsed
+
     def extract_numeric(self, pred_text: str) -> Optional[str]:
         if pred_text is None:
             return None
@@ -148,6 +225,10 @@ class AnswerScorer:
         """
         # Reset per-call details (still expose AlignScore best if available)
         self.last_alignscore_score = None
+
+        dataset = str(record.get("dataset") or "").lower()
+        if dataset == "mmlu":
+            return self._score_mmlu(record, pred_eval, raw_pred)
 
         # Source texts
         answers = [a.strip() for a in (record.get("answers") or []) if isinstance(a, str) and a.strip()]
@@ -176,6 +257,39 @@ class AnswerScorer:
         evaluated = (pred_eval or "").strip()
         if evaluated and self._exact_or_subset_match(evaluated, answers):
             return True
+        return False
+
+    def _score_mmlu(self, record: Dict, pred_eval: str, raw_pred: Optional[str]) -> bool:
+        answers = [a for a in (record.get("answers") or []) if isinstance(a, str) and a.strip()]
+        if not answers:
+            return False
+
+        normalized_answers = {self._normalize_choice_text(a) for a in answers}
+        prompt = str(record.get("prompt") or "")
+        options = self._extract_mmlu_options(record, prompt)
+
+        source_pred = raw_pred if raw_pred is not None else pred_eval
+        resolved = self.resolve_mmlu_choice(record, source_pred)
+        if resolved:
+            resolved_norm = self._normalize_choice_text(resolved)
+            if resolved_norm in normalized_answers:
+                return True
+
+        direct_norm = self._normalize_choice_text(source_pred)
+        if direct_norm in normalized_answers:
+            return True
+
+        # Allow direct evaluation string (already normalized or not) to match.
+        eval_norm = self._normalize_choice_text(pred_eval)
+        if eval_norm in normalized_answers:
+            return True
+
+        if len(direct_norm) == 1 and options:
+            letter = direct_norm
+            gold_letters = {opt_letter for opt_letter, _, opt_norm in options if opt_norm in normalized_answers}
+            if letter in gold_letters:
+                return True
+
         return False
 
     # -------------------- Internals --------------------

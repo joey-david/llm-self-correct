@@ -165,10 +165,13 @@ class Runner:
 
         heads = selected_heads if selected_heads is not None else self.head_selector.get_selected()
         heads_dict = dict(heads)
+        dataset_name = str(record.get("dataset") or "").lower()
+        agg_mode = "sum" if dataset_name == "mmlu" else None
         u_final, u_token, best_layer, best_head = self.rauq.compute(
             artifacts.logp_token,
             artifacts.a_prev_all_heads,
             heads_dict,
+            aggregate_mode=agg_mode,
         )
 
         result = {
@@ -315,6 +318,11 @@ class Runner:
         options = record.get("options") or []
 
         if answer_type == "choice":
+            dataset = str(record.get("dataset") or "").lower()
+            if dataset == "mmlu":
+                resolved = self.scorer.resolve_mmlu_choice(record, pred_text)
+                if resolved:
+                    return resolved.strip()
             picked = self.scorer.pick_choice(pred_text, options)
             return (picked or "").strip()
 
