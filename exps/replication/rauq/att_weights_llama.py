@@ -22,7 +22,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from src.rauq_minimal.model import ModelAdapter
 
-PROMPT_DEFAULT = "What is King Henry holding in the Portrait of Henry VIII?"
+PROMPT_DEFAULT = "Q: What is King Henry holding in the Portrait of Henry VIII?\nA:"
 _LAYER_PREFIX = "l"
 _ENV_PATH = _PROJECT_ROOT / ".env"
 
