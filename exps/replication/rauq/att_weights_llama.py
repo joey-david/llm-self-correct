@@ -108,7 +108,7 @@ def extract_prev_attention(attentions: Optional[Tuple[torch.Tensor, ...]]) -> Di
     return attn_per_layer
 
 
-def zero_attention_template(adapter: ModelAdapter) -> Dict[str, List[float]]:
+def _zero_attention_template(adapter: ModelAdapter) -> Dict[str, List[float]]:
     num_layers = int(getattr(adapter.config, "num_hidden_layers", 0) or 0)
     num_heads = int(getattr(adapter.config, "num_attention_heads", 0) or 0)
     return {f"{_LAYER_PREFIX}{layer}": [0.0] * num_heads for layer in range(num_layers)}
@@ -126,50 +126,37 @@ def collect_attention(
     prompt_ids = adapter.encode(prompt)
     prompt_mask = torch.ones_like(prompt_ids, dtype=torch.long, device=adapter.device)
 
-    gen_token_ids: List[int] = []
+    generated_ids: List[int] = []
     token_texts: List[str] = []
-    a_prev_all_heads: List[Dict[str, List[float]]] = []
+    attention_records: List[Dict[str, List[float]]] = []
 
-    next_token_id, _, _, past = adapter.step(prompt_ids, past_key_values=None, attention_mask=prompt_mask)
-    gen_token_ids.append(next_token_id)
+    next_token_id, _, attentions, past = adapter.step(
+        prompt_ids,
+        past_key_values=None,
+        attention_mask=prompt_mask,
+    )
+    generated_ids.append(next_token_id)
     token_texts.append(format_token(adapter, next_token_id))
-    a_prev_all_heads.append({})
+    attention_records.append(extract_prev_attention(attentions) or _zero_attention_template(adapter))
 
-    current_input_ids = torch.tensor([[next_token_id]], dtype=torch.long, device=adapter.device)
-    token_mask = make_cumulative_mask(past, current_input_ids.shape[1], adapter.device)
     stop = should_stop(next_token_id, adapter.eos_token_ids)
 
-    while len(gen_token_ids) < max_new_tokens and not stop:
+    while len(generated_ids) < max_new_tokens and not stop:
+        current_input_ids = torch.tensor([[next_token_id]], dtype=torch.long, device=adapter.device)
+        token_mask = make_cumulative_mask(past, current_input_ids.shape[1], adapter.device)
+
         next_token_id, _, attentions, past = adapter.step(
             current_input_ids,
             past_key_values=past,
             attention_mask=token_mask,
         )
-        a_prev_all_heads[-1] = extract_prev_attention(attentions)
-
-        gen_token_ids.append(next_token_id)
+        generated_ids.append(next_token_id)
         token_texts.append(format_token(adapter, next_token_id))
-        a_prev_all_heads.append({})
-
-        current_input_ids = torch.tensor([[next_token_id]], dtype=torch.long, device=adapter.device)
-        token_mask = make_cumulative_mask(past, current_input_ids.shape[1], adapter.device)
+        attention_records.append(extract_prev_attention(attentions) or _zero_attention_template(adapter))
         stop = should_stop(next_token_id, adapter.eos_token_ids)
 
-    if gen_token_ids and a_prev_all_heads[-1] == {}:
-        _, _, attentions, _ = adapter.step(
-            current_input_ids,
-            past_key_values=past,
-            attention_mask=make_cumulative_mask(past, current_input_ids.shape[1], adapter.device),
-        )
-        a_prev_all_heads[-1] = extract_prev_attention(attentions)
-
-    if gen_token_ids:
-        template = a_prev_all_heads[0] or zero_attention_template(adapter)
-        zero_dict = {layer: [0.0] * len(values) for layer, values in template.items()}
-        a_prev_all_heads[0] = zero_dict
-
-    generated_text = adapter.tokenizer.decode(gen_token_ids, skip_special_tokens=True)
-    return token_texts, gen_token_ids, a_prev_all_heads, generated_text
+    generated_text = adapter.tokenizer.decode(generated_ids, skip_special_tokens=True)
+    return token_texts, generated_ids, attention_records, generated_text
 
 
 def attention_matrix_for_layer(
@@ -205,7 +192,7 @@ def render_heatmap(
     num_tokens, num_heads = attn_matrix.shape
     fig_height = max(4.0, 0.35 * num_tokens)
     fig, ax = plt.subplots(figsize=(0.4 * num_heads + 5.0, fig_height))
-    im = ax.imshow(attn_matrix, aspect="auto", cmap="coolwarm", vmin=0.0, vmax=0.7)
+    im = ax.imshow(attn_matrix, aspect="auto", cmap="coolwarm", vmin=0.0, vmax=1.0)
 
     ax.set_xlabel("Attention head")
     ax.set_ylabel("Generated token")

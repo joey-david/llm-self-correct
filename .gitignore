@@ -12,7 +12,7 @@ data/plots/
 data/old_plots/
 
 # conda environment files
-env/
+.env/
 .venv/
 venv/
 .conda/

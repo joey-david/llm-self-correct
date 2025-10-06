@@ -1,9 +1,9 @@
 in: data/calibration/mmlu_calib.jsonl
 out: data/artifacts/mmlu_rauq_output.jsonl
-model: meta-llama/Llama-3.1-8B 
+model: meta-llama/Meta-Llama-3.1-8B 
 alpha: 0.2
 attn_implementation: eager
-max_new: 256
+max_new: 15
 device: auto
 head_calibration_samples: 128
 dataset_fraction: 1.0
