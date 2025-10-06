@@ -103,11 +103,9 @@ class RAUQ:
                 neg_log = -math.log(c_val)
                 token_max_u = neg_log if token_max_u is None else max(token_max_u, neg_log)
 
-                if idx > 0:
-                    # Only aggregate over generated tokens that have a previous generated token,
-                    # matching the paper's summation from i=2..N.
-                    layer_sums[layer] = layer_sums.get(layer, 0.0) + neg_log
-                    layer_counts[layer] = layer_counts.get(layer, 0) + 1
+                # Aggregate over all generated tokens i = 1..N as described in Eq. (3).
+                layer_sums[layer] = layer_sums.get(layer, 0.0) + neg_log
+                layer_counts[layer] = layer_counts.get(layer, 0) + 1
 
             u_token.append(token_max_u if token_max_u is not None else -math.log(prob))
 

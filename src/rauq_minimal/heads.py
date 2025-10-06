@@ -75,7 +75,7 @@ class HeadSelector:
             totals = self._totals.get(layer, [])
             counts = self._counts.get(layer, [])
             if head_count == 0:
-                selected[layer] = 0
+                # Nothing to select for this layer; skip so it cannot influence downstream scoring.
                 continue
 
             if len(totals) < head_count:

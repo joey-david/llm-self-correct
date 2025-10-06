@@ -22,7 +22,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from src.rauq_minimal.model import ModelAdapter
 
-PROMPT_DEFAULT = "What is King Henry holding in the Portrait of Henry VII?"
+PROMPT_DEFAULT = "What is King Henry holding in the Portrait of Henry VIII?"
 _LAYER_PREFIX = "l"
 _ENV_PATH = _PROJECT_ROOT / ".env"
 
@@ -192,7 +192,7 @@ def render_heatmap(
     num_tokens, num_heads = attn_matrix.shape
     fig_height = max(4.0, 0.35 * num_tokens)
     fig, ax = plt.subplots(figsize=(0.4 * num_heads + 5.0, fig_height))
-    im = ax.imshow(attn_matrix, aspect="auto", cmap="coolwarm", vmin=0.0, vmax=1.0)
+    im = ax.imshow(attn_matrix, aspect="auto", cmap="coolwarm", vmin=0.0, vmax=0.7)
 
     ax.set_xlabel("Attention head")
     ax.set_ylabel("Generated token")
