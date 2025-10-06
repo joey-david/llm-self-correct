@@ -1,0 +1,12 @@
+in: data/calibration/mmlu_calib.jsonl
+out: data/artifacts/mmlu_rauq_output.jsonl
+model: meta-llama/Llama-3.1-8B 
+alpha: 0.2
+attn_implementation: eager
+max_new: 256
+device: auto
+head_calibration_samples: 128
+dataset_fraction: 1.0
+store_all_heads: false
+layer_band: auto
+debug_progress: true
