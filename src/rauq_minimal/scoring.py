@@ -5,9 +5,6 @@ import logging
 import re
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
-import spacy
-
-
 _AlignScoreImpl = None
 try:
     from alignscore import AlignScore as _AlignScoreImpl  # type: ignore

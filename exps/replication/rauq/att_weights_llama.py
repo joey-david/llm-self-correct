@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -15,11 +16,14 @@ import yaml
 from dotenv import load_dotenv
 from huggingface_hub import login as hf_login
 
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
 from src.rauq_minimal.model import ModelAdapter
 
 PROMPT_DEFAULT = "What is King Henry holding in the Portrait of Henry VII?"
 _LAYER_PREFIX = "l"
-_PROJECT_ROOT = Path(__file__).resolve().parents[3]
 _ENV_PATH = _PROJECT_ROOT / ".env"
 
 
