@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+import os
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -12,21 +12,24 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import yaml
+from dotenv import load_dotenv
+from huggingface_hub import login as hf_login
 
 from src.rauq_minimal.model import ModelAdapter
 
-
 PROMPT_DEFAULT = "What is King Henry holding in the Portrait of Henry VII?"
 _LAYER_PREFIX = "l"
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
+_ENV_PATH = _PROJECT_ROOT / ".env"
 
 
-@dataclass
-class DecodeResult:
-    token_ids: List[int]
-    token_texts: List[str]
-    logp_token: List[float]
-    a_prev_all_heads: List[Dict[str, List[float]]]
-    generated_text: str
+def ensure_hf_login() -> None:
+    if _ENV_PATH.exists():
+        load_dotenv(_ENV_PATH)
+    token = os.getenv("HF_TOKEN")
+    if not token:
+        raise RuntimeError("HF_TOKEN is not configured in the project .env file.")
+    hf_login(token=token, add_to_git_credential=False)
 
 
 def load_config(path: Path) -> Dict:
@@ -41,7 +44,7 @@ def should_stop(token_id: int, eos_token_ids: Tuple[int, ...]) -> bool:
     return bool(eos_token_ids) and token_id in eos_token_ids
 
 
-def decode_token_text(adapter: ModelAdapter, token_id: int) -> str:
+def format_token(adapter: ModelAdapter, token_id: int) -> str:
     text = adapter.tokenizer.decode([token_id], skip_special_tokens=False)
     if not text:
         pieces = adapter.tokenizer.convert_ids_to_tokens([token_id])
@@ -108,11 +111,11 @@ def zero_attention_template(adapter: ModelAdapter) -> Dict[str, List[float]]:
 
 
 @torch.inference_mode()
-def greedy_decode(
+def collect_attention(
     adapter: ModelAdapter,
     prompt: str,
     max_new_tokens: int,
-) -> DecodeResult:
+) -> Tuple[List[str], List[int], List[Dict[str, List[float]]], str]:
     if max_new_tokens <= 0:
         raise ValueError("max_new_tokens must be positive to collect attentions")
 
@@ -121,13 +124,11 @@ def greedy_decode(
 
     gen_token_ids: List[int] = []
     token_texts: List[str] = []
-    logp_token: List[float] = []
     a_prev_all_heads: List[Dict[str, List[float]]] = []
 
-    next_token_id, logp, _, past = adapter.step(prompt_ids, past_key_values=None, attention_mask=prompt_mask)
+    next_token_id, _, _, past = adapter.step(prompt_ids, past_key_values=None, attention_mask=prompt_mask)
     gen_token_ids.append(next_token_id)
-    token_texts.append(decode_token_text(adapter, next_token_id))
-    logp_token.append(logp)
+    token_texts.append(format_token(adapter, next_token_id))
     a_prev_all_heads.append({})
 
     current_input_ids = torch.tensor([[next_token_id]], dtype=torch.long, device=adapter.device)
@@ -135,7 +136,7 @@ def greedy_decode(
     stop = should_stop(next_token_id, adapter.eos_token_ids)
 
     while len(gen_token_ids) < max_new_tokens and not stop:
-        next_token_id, logp, attentions, past = adapter.step(
+        next_token_id, _, attentions, past = adapter.step(
             current_input_ids,
             past_key_values=past,
             attention_mask=token_mask,
@@ -143,8 +144,7 @@ def greedy_decode(
         a_prev_all_heads[-1] = extract_prev_attention(attentions)
 
         gen_token_ids.append(next_token_id)
-        token_texts.append(decode_token_text(adapter, next_token_id))
-        logp_token.append(logp)
+        token_texts.append(format_token(adapter, next_token_id))
         a_prev_all_heads.append({})
 
         current_input_ids = torch.tensor([[next_token_id]], dtype=torch.long, device=adapter.device)
@@ -165,13 +165,7 @@ def greedy_decode(
         a_prev_all_heads[0] = zero_dict
 
     generated_text = adapter.tokenizer.decode(gen_token_ids, skip_special_tokens=True)
-    return DecodeResult(
-        token_ids=gen_token_ids,
-        token_texts=token_texts,
-        logp_token=logp_token,
-        a_prev_all_heads=a_prev_all_heads,
-        generated_text=generated_text,
-    )
+    return token_texts, gen_token_ids, a_prev_all_heads, generated_text
 
 
 def attention_matrix_for_layer(
@@ -235,7 +229,6 @@ def parse_args() -> argparse.Namespace:
         "--config",
         type=Path,
         required=True,
-        default=Path("configs/att_weights_llama.yaml"),
         help="Path to YAML config specifying model and decoding parameters.",
     )
     parser.add_argument(
@@ -272,6 +265,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    ensure_hf_login()
     config = load_config(args.config)
 
     model_name = config.get("model")
@@ -291,33 +285,36 @@ def main() -> None:
         attn_implementation=config.get("attn_implementation", "eager"),
         output_attentions=True,
         use_chat_template=bool(config.get("use_chat_template", False)),
-        trust_remote_code=bool(config.get("trust_remote_code", True)),
+        trust_remote_code=config.get("trust_remote_code"),
         debug_decode=bool(config.get("debug_decode", False)),
     )
 
-    decode = greedy_decode(adapter, args.prompt, max_new_tokens=max_new_tokens)
+    token_texts, _, a_prev_all_heads, generated_text = collect_attention(
+        adapter,
+        args.prompt,
+        max_new_tokens=max_new_tokens,
+    )
 
     layer_index_zero_based = args.layer - 1
     if layer_index_zero_based < 0:
         raise ValueError("Layer index must be >= 1")
     layer_key = f"{_LAYER_PREFIX}{layer_index_zero_based}"
 
-    attn_matrix = attention_matrix_for_layer(decode.a_prev_all_heads, layer_key)
-    render_heatmap(attn_matrix, decode.token_texts, str(args.layer), args.output, show=args.show)
+    attn_matrix = attention_matrix_for_layer(a_prev_all_heads, layer_key)
+    render_heatmap(attn_matrix, token_texts, str(args.layer), args.output, show=args.show)
 
     layer_means = attn_matrix.mean(axis=0)
     dominant_head = int(layer_means.argmax()) + 1
 
     print(f"Prompt: {args.prompt}")
     print(f"Model: {model_name}")
-    print(f"Generated text: {decode.generated_text}")
+    print(f"Generated text: {generated_text}")
     print(f"Saved attention heatmap to {args.output}")
     print(f"Layer {args.layer} dominant head (mean attention): Head {dominant_head}")
     print("Per-token previous-token attention (averaged across heads):")
     row_means = attn_matrix.mean(axis=1)
-    for idx, (token_text, score) in enumerate(zip(decode.token_texts, row_means), start=1):
+    for idx, (token_text, score) in enumerate(zip(token_texts, row_means), start=1):
         print(f"  {idx:02d}: {token_text} -> {score:.4f}")
 
 
-if __name__ == "__main__":
-    main()
+main()
