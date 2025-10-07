@@ -1,0 +1,28 @@
+model:
+  name: meta-llama/Meta-Llama-3.1-8B
+  max_new_tokens: 128
+rauq:
+  alpha: 0.2
+  layers: null
+datasets:
+  - name: truthfulqa
+    config: configs/datasets/truthfulqa.yaml
+  - name: mmlu
+    config: configs/datasets/mmlu.yaml
+  - name: xsum
+    config: configs/datasets/xsum.yaml
+  - name: samsum
+    config: configs/datasets/samsum.yaml
+  - name: cnn_dailymail
+    config: configs/datasets/cnn_dailymail.yaml
+  - name: wmt14_fren
+    config: configs/datasets/wmt14_fren.yaml
+  - name: wmt19_deen
+    config: configs/datasets/wmt19_deen.yaml
+gating:
+  spike:
+    tau_abs: 6.0
+    tau_rel: 2.5
+    window: 4
+    refractory: 3
+output_root: data/experiments

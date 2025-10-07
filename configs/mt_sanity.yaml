@@ -1,0 +1,17 @@
+model:
+  name: meta-llama/Meta-Llama-3.1-8B
+  max_new_tokens: 64
+rauq:
+  alpha: 0.2
+datasets:
+  - name: wmt14_fren
+    config: configs/datasets/wmt14_fren.yaml
+  - name: wmt19_deen
+    config: configs/datasets/wmt19_deen.yaml
+gating:
+  spike:
+    tau_abs: 6.0
+    tau_rel: 2.5
+    window: 4
+    refractory: 3
+output_root: data/experiments

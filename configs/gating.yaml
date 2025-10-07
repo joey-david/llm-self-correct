@@ -1,0 +1,18 @@
+spike:
+  tau_abs: 6.0
+  tau_rel: 2.5
+  window: 4
+  refractory: 3
+rollback:
+  depth: 3
+  temperature: 0.3
+  top_p: 0.7
+  repetition_penalty: 1.2
+cot:
+  prefix: "Let's reason this carefully."
+  temperature: 0.6
+utility:
+  value: 1.0
+  cost_cot: 0.1
+  cost_rb: 0.02
+  cost_latency: 0.001
