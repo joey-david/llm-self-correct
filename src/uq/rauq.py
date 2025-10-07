@@ -20,6 +20,10 @@ class RAUQOutput:
 
 
 def _mid_layers(num_layers: int) -> List[int]:
+    if num_layers <= 0:
+        raise ValueError("RAUQ requires at least one layer")
+    if num_layers <= 2:
+        return list(range(num_layers))
     third = max(num_layers // 3, 1)
     start = (num_layers - third) // 2
     return list(range(start, start + third))

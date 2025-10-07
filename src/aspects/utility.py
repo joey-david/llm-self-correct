@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Dict, Iterable, Tuple
 
@@ -33,6 +34,7 @@ def calibrate_configs(
     weights: UtilityWeights,
 ) -> Tuple[Dict[str, float], float]:
     best_cfg: Dict[str, float] | None = None
+    best_score = float("-inf")
     best_utility = float("-inf")
     for cfg in configs:
         name = cfg.get("name", str(cfg))
@@ -44,8 +46,11 @@ def calibrate_configs(
             data.get("delta_time", 0.0),
             weights,
         )
-        if util > best_utility:
+        delta_acc = float(data.get("delta_acc", 0.0)) * weights.value
+        score = delta_acc  # prefer higher accuracy gains before considering cost trade-offs
+        if score > best_score or (math.isclose(score, best_score) and util > best_utility):
             best_cfg = dict(cfg)
+            best_score = score
             best_utility = util
     if best_cfg is None:
         raise ValueError("No calibration configs provided")
