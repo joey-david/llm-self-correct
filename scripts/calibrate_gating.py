@@ -7,6 +7,7 @@ from pathlib import Path
 
 import yaml
 
+from _path import project_root
 from src.aspects import UtilityWeights, calibrate_configs
 
 
@@ -19,8 +20,15 @@ def main() -> None:
     parser.add_argument("--cost-rb", type=float, default=0.01)
     parser.add_argument("--cost-latency", type=float, default=0.001)
     args = parser.parse_args()
-    grid = yaml.safe_load(Path(args.grid).read_text())
-    stats = json.loads(Path(args.stats).read_text())
+    root = project_root()
+    grid_path = Path(args.grid)
+    stats_path = Path(args.stats)
+    if not grid_path.is_absolute():
+        grid_path = root / grid_path
+    if not stats_path.is_absolute():
+        stats_path = root / stats_path
+    grid = yaml.safe_load(grid_path.read_text())
+    stats = json.loads(stats_path.read_text())
     weights = UtilityWeights(
         value=args.value,
         cost_cot=args.cost_cot,

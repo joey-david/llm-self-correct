@@ -1,6 +1,6 @@
 .PHONY: test run_bench qa_sanity summ_sanity mt_sanity plots
 
-PYTHON ?= python
+PYTHON ?= python3
 
 install:
 	uv pip install -r env/requirements.txt
