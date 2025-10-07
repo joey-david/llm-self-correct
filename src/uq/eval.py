@@ -4,7 +4,9 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Union
+
+import torch
 
 from ..datasets import load_dataset
 from ..aspects import SpikeConfig, detect_spikes
@@ -34,7 +36,25 @@ def run_eval(config_path: Path | str, output_dir: Path | None = None) -> EvalRes
     out_dir = Path(output_dir or cfg.get("output_dir", _default_out(cfg)))
     setup_logging(out_dir)
     model_cfg = cfg.get("model", {})
-    generator = HFGenerator(model_cfg.get("name", "meta-llama/Meta-Llama-3.1-8B"), force_cpu=force_cpu)
+    torch_dtype_cfg: Union[str, torch.dtype, None] = model_cfg.get("torch_dtype")
+    if isinstance(torch_dtype_cfg, str):
+        dtype_attr = torch_dtype_cfg.strip().lower()
+        if dtype_attr == "auto":
+            torch_dtype = torch_dtype_cfg  # type: ignore[assignment]
+        else:
+            try:
+                torch_dtype = getattr(torch, dtype_attr)
+            except AttributeError as exc:
+                raise ValueError(f"Unsupported torch dtype requested: {torch_dtype_cfg}") from exc
+    elif torch_dtype_cfg is None or isinstance(torch_dtype_cfg, torch.dtype):
+        torch_dtype = torch_dtype_cfg
+    else:
+        raise TypeError(f"torch_dtype must be a string or torch.dtype, got {type(torch_dtype_cfg).__name__}")
+    generator = HFGenerator(
+        model_cfg.get("name", "meta-llama/Meta-Llama-3.1-8B"),
+        force_cpu=force_cpu,
+        torch_dtype=torch_dtype if torch_dtype != "auto" else None,
+    )
     max_tokens = int(model_cfg.get("max_new_tokens", 256))
     rauq_cfg = cfg.get("rauq", {})
     alpha = float(rauq_cfg.get("alpha", 0.2))
