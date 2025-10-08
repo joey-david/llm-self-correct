@@ -1,2 +1,6 @@
 split: validation
 limit: 16
+hf_dataset: knkarthick/samsum
+document_key: dialogue
+summary_key: summary
+local_file: data/static/samsum_validation.jsonl

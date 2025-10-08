@@ -1,3 +1,4 @@
 split: validation
 limit: 32
 hf_config: generation
+local_file: data/static/truthfulqa_generation.jsonl

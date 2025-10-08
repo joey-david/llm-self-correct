@@ -1,2 +1,7 @@
 split: validation
 limit: 8
+hf_dataset: ccdv/cnn_dailymail
+hf_config: "3.0.0"
+document_key: article
+summary_key: highlights
+local_file: data/static/cnn_dailymail_validation.jsonl

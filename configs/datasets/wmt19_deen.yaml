@@ -1,2 +1,5 @@
 split: validation
 limit: 32
+hf_dataset: wmt/wmt19
+hf_config: de-en
+local_file: data/static/wmt19_deen_validation.jsonl

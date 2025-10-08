@@ -1,2 +1,5 @@
 split: validation
 limit: 32
+hf_dataset: wmt/wmt14
+hf_config: fr-en
+local_file: data/static/wmt14_fren_validation.jsonl

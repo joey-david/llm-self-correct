@@ -1,3 +1,4 @@
 subject: abstract_algebra
 split: validation
 limit: 32
+local_file: data/static/mmlu_abstract_algebra.jsonl

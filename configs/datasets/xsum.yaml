@@ -1,2 +1,4 @@
 split: validation
 limit: 16
+hf_dataset: GEM/xsum
+local_file: data/static/xsum_validation.jsonl
