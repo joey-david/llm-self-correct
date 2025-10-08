@@ -16,6 +16,8 @@ GLOBAL_SEED = 20251006
 def enforce_determinism(seed: int = GLOBAL_SEED) -> None:
     random.seed(seed)
     os.environ.setdefault("PYTHONHASHSEED", str(seed))
+    # ensure cuBLAS reproducibility; must be set before first matmul
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     try:  # numpy is optional
         import numpy as np  # type: ignore
 

@@ -59,24 +59,50 @@ class HFGenerator:
         probs = torch.softmax(scores, dim=-1)
         token_probs = torch.gather(probs, dim=-1, index=new_tokens.unsqueeze(-1)).squeeze(-1)
         # stitch attentions (list over steps -> per-layer tensors)
-        num_layers = len(outputs.attentions[0]) if outputs.attentions else 0
-        stitched = []
-        for layer_idx in range(num_layers):
-            num_heads = outputs.attentions[0][layer_idx].size(1)
-            total_len = prompt_len + new_tokens.size(1)
-            buf = torch.zeros(1, num_heads, total_len, total_len, device="cpu")
-            stitched.append(buf)
-        for step, per_layer in enumerate(outputs.attentions):
-            cur_len = prompt_len + step + 1
-            for layer_idx, layer_attn in enumerate(per_layer):
-                buf = stitched[layer_idx]
-                buf[:, :, :cur_len, :cur_len] = layer_attn.detach().cpu()
+        total_len = sequences.size(1)
+        stitched: list[torch.Tensor] = []
+        if outputs.attentions:
+            num_layers = len(outputs.attentions[0])
+            for layer_idx in range(num_layers):
+                sample = outputs.attentions[0][layer_idx].detach().cpu()
+                if sample.dim() == 4:
+                    sample = sample[0]
+                if sample.dim() != 3:
+                    raise RuntimeError("unexpected attention dimensions")
+                num_heads = sample.size(0)
+                buf = torch.zeros(num_heads, total_len, total_len, device="cpu")
+                stitched.append(buf)
+            generated_rows = 0
+            for step, per_layer in enumerate(outputs.attentions):
+                step_q_len = None
+                step_prefill = False
+                for layer_idx, layer_attn in enumerate(per_layer):
+                    tensor = layer_attn.detach().cpu()
+                    if tensor.dim() == 4:
+                        tensor = tensor[0]
+                    if tensor.dim() != 3:
+                        raise RuntimeError("unexpected attention dimensions")
+                    num_heads, q_len, kv_len = tensor.shape
+                    if step_q_len is None:
+                        step_q_len = q_len
+                        step_prefill = (
+                            generated_rows == 0 and q_len == prompt_len and kv_len == prompt_len
+                        )
+                    buf = stitched[layer_idx]
+                    if step_prefill:
+                        row_slice = slice(0, q_len)
+                    else:
+                        start = prompt_len + generated_rows
+                        row_slice = slice(start, start + q_len)
+                    buf[:num_heads, row_slice, :kv_len] = tensor
+                if step_q_len is not None and not step_prefill:
+                    generated_rows += step_q_len
         decoded = self.tokenizer.batch_decode(sequences[:, prompt_len:], skip_special_tokens=True)
         return GenerationOutput(
             prompt_len=prompt_len,
             tokens=new_tokens.detach().cpu(),
             token_probs=token_probs.detach().cpu()[0],
             scores=scores.detach().cpu()[0],
-            attentions=[layer[0] for layer in stitched],
+            attentions=stitched,
             text=decoded[0],
         )
