@@ -13,7 +13,7 @@ def load(config: dict) -> list[Example]:
         load_dataset,
         "truthful_qa",
         split=split,
-        config_name=hf_config,
+        name=hf_config,
         limit=limit,
         mapper=lambda row: Example(
             uid=str(row["question"]),
