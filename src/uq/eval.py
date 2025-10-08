@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Union
 
 import torch
+from tqdm.auto import tqdm
 
 from ..datasets import load_dataset
 from ..aspects import SpikeConfig, detect_spikes
@@ -72,8 +73,10 @@ def run_eval(config_path: Path | str, output_dir: Path | None = None) -> EvalRes
     scores_records = []
     baseline_records = []
     pred_records = []
-    for ds_cfg in dataset_cfgs:
+    dataset_iter = tqdm(dataset_cfgs, desc="Datasets", unit="dataset")
+    for ds_cfg in dataset_iter:
         name = ds_cfg["name"]
+        dataset_iter.set_postfix_str(name)
         logging.info("Running dataset %s", name)
         opts = {k: v for k, v in ds_cfg.items() if k != "name"}
         config_path = opts.pop("config", None)
@@ -82,7 +85,8 @@ def run_eval(config_path: Path | str, output_dir: Path | None = None) -> EvalRes
             base.update(opts)
             opts = base
         examples = load_dataset(name, opts)
-        for ex in examples:
+        example_iter = tqdm(examples, desc=name, unit="sample", leave=False)
+        for ex in example_iter:
             out = generator.generate(ex.prompt, max_new_tokens=max_tokens)
             rauq_out = rauq_score(out.token_probs, out.attentions, out.prompt_len, alpha=alpha, layers_subset=layers)
             bas_msp = msp_perplexity(out.token_probs)
